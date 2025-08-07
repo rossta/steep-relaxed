@@ -831,11 +831,11 @@ module Steep
       # ```
       #
       class DifferentMethodParameterKind < Base
-        attr_reader method_param: TypeInference::MethodParams::PositionalParameter | TypeInference::MethodParams::KeywordParameter
+        attr_reader method_param: TypeInference::MethodParams::PositionalParameter | TypeInference::MethodParams::PositionalRestParameter | TypeInference::MethodParams::KeywordParameter | TypeInference::MethodParams::KeywordRestParameter
 
         attr_reader method_type: Interface::MethodType
 
-        def initialize: (method_param: TypeInference::MethodParams::PositionalParameter | TypeInference::MethodParams::KeywordParameter, method_type: Interface::MethodType) -> void
+        def initialize: (method_param: TypeInference::MethodParams::PositionalParameter | TypeInference::MethodParams::PositionalRestParameter | TypeInference::MethodParams::KeywordParameter | TypeInference::MethodParams::KeywordRestParameter, method_type: Interface::MethodType) -> void
 
         def header_line: () -> String
       end
@@ -1403,7 +1403,7 @@ module Steep
       # The syntax is not currently supported by Steep.
       #
       class UnsupportedSyntax < Base
-        attr_reader message: String
+        attr_reader message: String?
 
         def initialize: (node: Node, ?message: String?) -> void
 
@@ -1760,8 +1760,8 @@ module Steep
         # end
         # ```
         #
-        def initialize: (node: Parser::AST::Node, method_name: Symbol, params_pair: [Interface::Function::Params, Interface::Function::Params], result: Subtyping::Result::Base) -> void
-                      | (node: Parser::AST::Node, method_name: Symbol, block_pair: [Interface::Block?, Interface::Block?], result: Subtyping::Result::Base) -> void
+        def initialize: (node: Parser::AST::Node, method_name: Symbol, params_pair: [Interface::Function::Params, Interface::Function::Params], result: Subtyping::Result::t) -> void
+                      | (node: Parser::AST::Node, method_name: Symbol, block_pair: [Interface::Block?, Interface::Block?], result: Subtyping::Result::t) -> void
 
         def header_line: () -> String
       end
@@ -1909,6 +1909,50 @@ module Steep
         def initialize: (method_name: Symbol, node: Node) -> void
 
         def header_line: () -> String
+      end
+
+      # Method call or constant reference is deprecated.
+      #
+      # ### RBS
+      #
+      # ```rbs
+      # %a{deprecated} class Foo end
+      #
+      # class Bar
+      #   %a{deprecated: since v0.9} def self.bar: () -> void
+      # end
+      # ```
+      #
+      # ### Ruby code
+      #
+      # ```ruby
+      # Foo
+      #
+      # Bar.bar()
+      # ```
+      #
+      # ### Diagnostic
+      #
+      # ```
+      # lib/deprecated.rb:1:0: [warning] The constant is deprecated
+      # │ Diagnostic ID: Ruby::DeprecatedReference
+      # │
+      # └ Foo
+      #   ~~~
+      #
+      # lib/deprecated.rb:3:4: [warning] The method is deprecated: since v0.9
+      # │ Diagnostic ID: Ruby::DeprecatedReference
+      # │
+      # └ Bar.bar()
+      #       ~~~
+      # ```
+      #
+      class DeprecatedReference < Base
+        attr_reader message: String?
+
+        def initialize: (node: Node, location: location, message: String?) -> void
+
+        def header_line: () -> void
       end
 
       ALL: Array[singleton(Base)]

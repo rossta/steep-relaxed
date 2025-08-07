@@ -51,9 +51,17 @@ module Steep
             raise
           end
         end
+
+        def deprecated?
+          if AnnotationsHelper.deprecated_type_name?(full_name, env)
+            true
+          else
+            false
+          end
+        end
       end
 
-      SimpleMethodNameItem = _ = Struct.new(:identifier, :range, :receiver_type, :method_types, :method_member, :method_name, keyword_init: true) do
+      SimpleMethodNameItem = _ = Struct.new(:identifier, :range, :receiver_type, :method_types, :method_member, :method_name, :deprecated, keyword_init: true) do
         # @implements SimpleMethodNameItem
 
         def comment
@@ -640,13 +648,15 @@ module Steep
                   all_members.each do |member|
                     associated_decl = all_decls.find {|decl| decl.method_def.member == member } or next
                     overloads = method_entry.overloads.select {|overload| overload.method_defs.any? {|defn| defn.member == member }}
+                    annotations = associated_decl.method_def.member_annotations
                     items << SimpleMethodNameItem.new(
                       identifier: name,
                       range: range,
                       receiver_type: type,
                       method_name: associated_decl.method_name,
                       method_types: overloads.map {|overload| subtyping.factory.method_type_1(overload.method_type) },
-                      method_member: member
+                      method_member: member,
+                      deprecated: AnnotationsHelper.deprecated_annotation?(annotations) ? true : false
                     )
                   end
                 else

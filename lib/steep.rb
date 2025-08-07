@@ -17,6 +17,7 @@ require "yaml"
 require "securerandom"
 require "base64"
 require "time"
+require 'socket'
 
 require "concurrent/utility/processor_counter"
 require "terminal-table"
@@ -150,6 +151,11 @@ require "steep/drivers/init"
 require "steep/drivers/vendor"
 require "steep/drivers/worker"
 require "steep/drivers/diagnostic_printer"
+require "steep/drivers/diagnostic_printer/base_formatter"
+require "steep/drivers/diagnostic_printer/code_formatter"
+require "steep/drivers/diagnostic_printer/github_actions_formatter"
+
+require "steep/annotations_helper"
 
 if ENV["NO_COLOR"]
   Rainbow.enabled = false
@@ -224,6 +230,10 @@ module Steep
         Steep.logger.error "  #{loc}"
       end
     end
+  end
+
+  def self.can_fork?
+    defined?(fork)
   end
 
   class Sampler

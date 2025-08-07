@@ -169,25 +169,45 @@ module Steep
               return [truthy_result, falsy_result]
             end
           else
-            if env[node]
-              truthy_type, falsy_type = factory.partition_union(type)
+            receiver, *_ = node.children
+            receiver_type = typing.type_of(node: receiver) if receiver
 
-              truthy_result =
-                if truthy_type
-                  Result.new(type: truthy_type, env: env.refine_types(pure_call_types: { node => truthy_type }), unreachable: false)
-                else
-                  Result.new(type: type, env: env, unreachable: true)
-                end
-
-              falsy_result =
-                if falsy_type
-                  Result.new(type: falsy_type, env: env.refine_types(pure_call_types: { node => falsy_type }), unreachable: false)
-                else
-                  Result.new(type: type, env: env, unreachable: true)
-                end
-
-              return [truthy_result, falsy_result]
+            if env[receiver] && receiver_type.is_a?(AST::Types::Union)
+              result = evaluate_union_method_call(node: node, type: type, env: env, receiver: receiver, receiver_type: receiver_type)
+              if result
+                truthy_result = result[0] unless result[0].unreachable
+                falsy_result = result[1] unless result[1].unreachable
+              end
             end
+
+            truthy_result ||= Result.new(type: type, env: env, unreachable: false)
+            falsy_result ||= Result.new(type: type, env: env, unreachable: false)
+
+            truthy_type, falsy_type = factory.partition_union(type)
+
+            if truthy_type
+              truthy_result = truthy_result.update_type { truthy_type }
+            else
+              truthy_result = truthy_result.update_type { BOT }.unreachable!
+            end
+
+            if falsy_type
+              falsy_result = falsy_result.update_type { falsy_type }
+            else
+              falsy_result = falsy_result.update_type { BOT }.unreachable!
+            end
+
+            if truthy_result.env[node] && falsy_result.env[node]
+              if truthy_type
+                truthy_result = Result.new(type: truthy_type, env: truthy_result.env.refine_types(pure_call_types: { node => truthy_type }), unreachable: false)
+              end
+
+              if falsy_type
+                falsy_result = Result.new(type: falsy_type, env: falsy_result.env.refine_types(pure_call_types: { node => falsy_type }), unreachable: false)
+              end
+            end
+
+            return [truthy_result, falsy_result]
           end
         end
 
@@ -406,6 +426,48 @@ module Steep
             ]
           end
         end
+      end
+
+      def evaluate_union_method_call(node:, type:, env:, receiver:, receiver_type:)
+        call_type = typing.call_of(node: node) rescue nil
+        return unless call_type.is_a?(Steep::TypeInference::MethodCall::Typed)
+
+        truthy_types = [] #: Array[AST::Types::t]
+        falsy_types = [] #: Array[AST::Types::t]
+
+        receiver_type.types.each do |type|
+          if shape = subtyping.builder.shape(type, config)
+            method = shape.methods[call_type.method_name] or raise
+            method_type = method.method_types.find do |method_type|
+              call_type.method_decls.any? {|decl| factory.method_type(decl.method_type) == method_type }
+            end
+            if method_type
+              return_type = method_type.type.return_type
+              truthy, falsy = factory.partition_union(return_type)
+              truthy_types << type if truthy
+              falsy_types << type if falsy
+              next
+            end
+          end
+
+          truthy_types << type
+          falsy_types << type
+        end
+
+        truthy_type = truthy_types.empty? ? BOT : AST::Types::Union.build(types: truthy_types)
+        falsy_type = falsy_types.empty? ? BOT : AST::Types::Union.build(types: falsy_types)
+
+        truthy_env, falsy_env = refine_node_type(
+          env: env,
+          node: receiver,
+          truthy_type: truthy_type,
+          falsy_type: falsy_type
+        )
+
+        return [
+          Result.new(type: type, env: truthy_env, unreachable: truthy_type.nil?),
+          Result.new(type: type, env: falsy_env, unreachable: falsy_type.nil?)
+        ]
       end
 
       def decompose_value(node)

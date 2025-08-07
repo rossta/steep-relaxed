@@ -975,6 +975,21 @@ super { } # $ nil
     end
   end
 
+  def test_selectorless_sendish_node_with_annotation_comment
+    with_factory({ Pathname("foo.rbs") => <<-RBS }) do |factory|
+      RBS
+      source = Steep::Source.parse(<<-EOF, path: Pathname("foo.rb"), factory: factory)
+        proc{}.() do
+          x #: nil
+        end
+      EOF
+
+      source.node.children[0].tap do |node|
+        assert_equal :send, node.type
+      end
+    end
+  end
+
   def test_find_comment
     with_factory() do |factory|
       source = Steep::Source.parse(<<~RUBY, path: Pathname("foo.rb"), factory: factory)
@@ -987,6 +1002,33 @@ super { } # $ nil
       assert_equal "# comment 1", source.find_comment(line: 1, column: 1).text
       assert_equal "# comment 2", source.find_comment(line: 2, column: 1).text
       assert_equal "# comment 3", source.find_comment(line: 3, column: 13).text
+    end
+  end
+
+  def test_annotation_attached_to_block
+    with_factory do |factory|
+      code = <<~RUBY
+        [1,2,3].map do
+          # @type block: String
+          _1 + 2
+        end.ffffffffff
+      RUBY
+
+      source = Steep::Source.parse(code, path: Pathname("foo.rb"), factory: factory)
+
+      source.node.tap do |send|
+        assert_equal :send, send.type
+        source.annotations(block: send, factory: factory, context: nil).tap do |annotations|
+          assert_empty annotations.annotations
+        end
+
+        send.children[0].tap do |numblock|
+          assert_equal :numblock, numblock.type
+          source.annotations(block: numblock, factory: factory, context: nil).tap do |annotations|
+            refute_nil annotations.block_type_annotation
+          end
+        end
+      end
     end
   end
 end

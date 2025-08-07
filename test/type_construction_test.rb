@@ -1076,7 +1076,7 @@ end
         method_context: nil,
         module_context: module_context,
         break_context: nil,
-        self_type: nil,
+        self_type: parse_type("::Steep"),
         type_env: type_env,
         call_context: MethodCall::TopLevelContext.new,
         variable_context: Context::TypeVariableContext.empty
@@ -1167,7 +1167,7 @@ class Steep end
         method_context: nil,
         module_context: module_context,
         break_context: nil,
-        self_type: nil,
+        self_type: parse_type("::Steep"),
         type_env: type_env,
         call_context: MethodCall::ModuleContext.new(type_name: RBS::TypeName.parse("::Steep")),
         variable_context: Context::TypeVariableContext.empty
@@ -7063,7 +7063,7 @@ r = x.map(&method(:my_to_s))
         assert_typing_error typing, size: 1 do |errors|
           assert_any!(errors) do |error|
             assert_instance_of Diagnostic::Ruby::BlockTypeMismatch, error
-            assert /^\^\(::Integer\) -> X\(\d+\)$/ =~ error.expected.to_s
+            assert (/^\^\(::Integer\) -> X\(\d+\)$/ =~ error.expected.to_s)
             assert_equal parse_type("^(::String) -> ::String"), error.actual
           end
         end

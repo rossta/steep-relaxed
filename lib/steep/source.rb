@@ -257,7 +257,7 @@ module Steep
         annot.line or next
 
         case node.type
-        when :def, :module, :class, :block, :ensure, :defs, :resbody
+        when :def, :module, :class, :block, :numblock, :ensure, :defs, :resbody
           location = node.loc
           location.line <= annot.line && annot.line < location.last_line
         else
@@ -646,7 +646,7 @@ module Steep
         receiver_node, name, _, location = deconstruct_send_node!(send_node)
 
         if receiver_node
-          if location.dot
+          if location.dot && location.selector
             location.selector.line
           end
         else

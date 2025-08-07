@@ -1494,6 +1494,10 @@ module Steep
                   Diagnostic::Ruby::UnknownConstant.new(node: name_node, name: name_node.children[1]).class!
                 )
               end
+
+              if class_name
+                check_deprecation_constant(class_name, name_node, name_node.location.expression)
+              end
             else
               _, constr = synthesize(name_node)
             end
@@ -1548,6 +1552,10 @@ module Steep
             if name_node.type == :const
               _, constr, module_name = synthesize_constant_decl(name_node, name_node.children[0], name_node.children[1]) do
                 typing.add_error Diagnostic::Ruby::UnknownConstant.new(node: name_node, name: name_node.children[1]).module!
+              end
+
+              if module_name
+                check_deprecation_constant(module_name, name_node, name_node.location.expression)
               end
             else
               _, constr = synthesize(name_node)
@@ -1619,6 +1627,7 @@ module Steep
 
             if name
               typing.source_index.add_reference(constant: name, ref: node)
+              constr.check_deprecation_constant(name, node, node.location.expression)
             end
 
             Pair.new(type: type, constr: constr)
@@ -1637,6 +1646,8 @@ module Steep
 
             if constant_name
               typing.source_index.add_definition(constant: constant_name, definition: node)
+              location = node.location #: Parser::Source::Map & Parser::AST::_Variable
+              constr.check_deprecation_constant(constant_name, node, location.name)
             end
 
             value_type, constr = constr.synthesize(node.children.last, hint: constant_type)
@@ -2400,6 +2411,9 @@ module Steep
             lhs_type = context.type_env[name]
             rhs_type, constr = synthesize(rhs, hint: lhs_type).to_ary
 
+            location = node.location #: Parser::Source::Map & Parser::AST::_Variable
+            constr.check_deprecation_global(name, node, location.name)
+
             type, constr = constr.gvasgn(node, rhs_type)
 
             constr.add_typing(node, type: type)
@@ -2408,6 +2422,9 @@ module Steep
         when :gvar
           yield_self do
             name = node.children.first
+
+            check_deprecation_global(name, node, node.location.expression)
+
             if type = context.type_env[name]
               add_typing(node, type: type)
             else
@@ -2956,7 +2973,7 @@ module Steep
               nil
             ]
           else
-            # No neesting
+            # No nesting
             synthesize_constant(node, nil, constant_name, &block)
           end
         end
@@ -3091,7 +3108,7 @@ module Steep
         body_node,
         block_params: params,
         block_param_hint: params_hint,
-        block_type_hint: return_hint,
+        block_next_type: return_hint,
         block_block_hint: block_hint,
         block_annotations: block_annotations,
         block_self_hint: self_hint,
@@ -3220,6 +3237,18 @@ module Steep
       end
     end
 
+    def deprecated_send?(call)
+      return unless call.node.type == :send || call.node.type == :csend
+
+      call.method_decls.each do |decl|
+        if pair = AnnotationsHelper.deprecated_annotation?(decl.method_def.each_annotation.to_a)
+          return pair
+        end
+      end
+
+      nil
+    end
+
     def type_send_interface(node, interface:, receiver:, receiver_type:, method_name:, arguments:, block_params:, block_body:, tapp:, hint:)
       method = interface.methods[method_name]
 
@@ -3272,6 +3301,20 @@ module Steep
                   end
                 end
               end
+            end
+
+            if (_, message = deprecated_send?(call))
+              send_node, _ = deconstruct_sendish_and_block_nodes(node)
+              send_node or raise
+              _, _, _, loc = deconstruct_send_node!(send_node)
+
+              constr.typing.add_error(
+                Diagnostic::Ruby::DeprecatedReference.new(
+                  node: node,
+                  location: loc.selector,
+                  message: message
+                )
+              )
             end
           end
 
@@ -3415,7 +3458,7 @@ module Steep
             block_annotations = source.annotations(block: node, factory: checker.factory, context: nesting)
             block_params or raise
 
-            constr = constr.synthesize_children(node.children[0])
+            constr = constr.synthesize_children(node.children[0], skips: [receiver])
 
             constr.type_block_without_hint(
               node: node,
@@ -3821,26 +3864,40 @@ module Steep
       if forwarded_args
         method_name or raise "method_name cannot be nil if `forwarded_args` is given, because proc/block doesn't support `...` arg"
 
-        (params, block = context.method_context&.forward_arg_type) or raise
+        method_context = context.method_context or raise
+        forward_arg_type = method_context.forward_arg_type
 
-        checker.with_context(self_type: self_type, instance_type: context.module_context.instance_type, class_type: context.module_context.module_type, constraints: constraints) do
-          result = checker.check_method_params(
-            :"... (argument forwarding)",
-            Subtyping::Relation.new(
-              sub_type: forwarded_args.params,
-              super_type: params
-            )
-          )
+        case forward_arg_type
+        when nil
+          if context.method_context.method_type
+            raise "Method context must have `forwarded_arg_type` if `...` node appears in it"
+          else
+            # Skips type checking forwarded argument because the method type is not given
+          end
+        when true
+          # Skip type checking forwarded argument because the method is untyped function
+        else
+          params, _block = forward_arg_type
 
-          if result.failure?
-            errors.push(
-              Diagnostic::Ruby::IncompatibleArgumentForwarding.new(
-                method_name: method_name,
-                node: forwarded_args.node,
-                params_pair: [params, forwarded_args.params],
-                result: result
+          checker.with_context(self_type: self_type, instance_type: context.module_context.instance_type, class_type: context.module_context.module_type, constraints: constraints) do
+            result = checker.check_method_params(
+              :"... (argument forwarding)",
+              Subtyping::Relation.new(
+                sub_type: forwarded_args.params,
+                super_type: params
               )
             )
+
+            if result.failure?
+              errors.push(
+                Diagnostic::Ruby::IncompatibleArgumentForwarding.new(
+                  method_name: method_name,
+                  node: forwarded_args.node,
+                  params_pair: [params, forwarded_args.params],
+                  result: result
+                )
+              )
+            end
           end
         end
       end
@@ -4007,7 +4064,7 @@ module Steep
                 block_body,
                 block_params: block_params_,
                 block_param_hint: method_type.block.type.params,
-                block_type_hint: method_type.block.type.return_type,
+                block_next_type: method_type.block.type.return_type,
                 block_block_hint: nil,
                 block_annotations: block_annotations,
                 block_self_hint: method_type.block.self_type,
@@ -4062,6 +4119,15 @@ module Steep
 
                 fvs_.merge(method_type.type.params.free_variables) if method_type.type.params
                 fvs_.merge(method_type.block.type.params.free_variables) if method_type.block.type.params
+                (method_type.type.return_type.free_variables + method_type.block.type.return_type.free_variables).each do |var|
+                  if var.is_a?(Symbol)
+                    if constraints.unknown?(var)
+                      unless constraints.has_constraint?(var)
+                        fvs_.delete(var)
+                      end
+                    end
+                  end
+                end
 
                 constraints.solution(checker, variables: fvs_, context: ccontext)
               }
@@ -4073,7 +4139,7 @@ module Steep
                 block_constr = block_constr.update_type_env {|env| env.subst(s) }
                 block_constr = block_constr.update_context {|context|
                   context.with(
-                    self_type: method_type.block.self_type || context.self_type,
+                    self_type: context.self_type.subst(s),
                     type_env: context.type_env.subst(s),
                     block_context: context.block_context&.subst(s),
                     break_context: context.break_context&.subst(s)
@@ -4194,18 +4260,29 @@ module Steep
 
             case
             when forwarded_args_node = args.forwarded_args_node
-              (_, block = method_context!.forward_arg_type) or raise
+              case forward_arg_type = method_context!.forward_arg_type
+              when nil
+                if method_context!.method_type
+                  raise "Method context must have `forwarded_arg_type` if `...` node appears in it"
+                else
+                  # Skips type checking forwarded argument because the method type is not given
+                end
+              when true
+                # Skip type checking because it's untyped function
+              else
+                _, block = forward_arg_type
 
-              method_block_type = method_type.block&.to_proc_type || AST::Builtin.nil_type
-              forwarded_block_type = block&.to_proc_type || AST::Builtin.nil_type
+                method_block_type = method_type.block&.to_proc_type || AST::Builtin.nil_type
+                forwarded_block_type = block&.to_proc_type || AST::Builtin.nil_type
 
-              if result = constr.no_subtyping?(sub_type: forwarded_block_type, super_type: method_block_type)
-                errors << Diagnostic::Ruby::IncompatibleArgumentForwarding.new(
-                  method_name: method_name,
-                  node: forwarded_args_node,
-                  block_pair: [block, method_type.block],
-                  result: result
-                )
+                if result = constr.no_subtyping?(sub_type: forwarded_block_type, super_type: method_block_type)
+                  errors << Diagnostic::Ruby::IncompatibleArgumentForwarding.new(
+                    method_name: method_name,
+                    node: forwarded_args_node,
+                    block_pair: [block, method_type.block],
+                    result: result
+                  )
+                end
               end
 
             when arg.compatible?
@@ -4358,7 +4435,7 @@ module Steep
         block_body,
         block_params: block_params,
         block_param_hint: nil,
-        block_type_hint: nil,
+        block_next_type: nil,
         block_block_hint: nil,
         block_annotations: block_annotations,
         block_self_hint: nil,
@@ -4411,7 +4488,7 @@ module Steep
       end
     end
 
-    def for_block(body_node, block_params:, block_param_hint:, block_type_hint:, block_block_hint:, block_annotations:, node_type_hint:, block_self_hint:)
+    def for_block(body_node, block_params:, block_param_hint:, block_next_type:, block_block_hint:, block_annotations:, node_type_hint:, block_self_hint:)
       block_param_pairs = block_param_hint && block_params.zip(block_param_hint, block_block_hint, factory: checker.factory)
 
       # @type var param_types_hash: Hash[Symbol?, AST::Types::t]
@@ -4453,7 +4530,7 @@ module Steep
 
       param_types = param_types_hash.each.with_object({}) do |pair, hash| #$ Hash[Symbol, [AST::Types::t, AST::Types::t?]]
         name, type = pair
-        # skip unamed arguments `*`, `**` and `&`
+        # skip unnamed arguments `*`, `**` and `&`
         next if name.nil?
         hash[name] = [type, nil]
       end
@@ -4500,24 +4577,28 @@ module Steep
                    end
 
       block_context = TypeInference::Context::BlockContext.new(
-        body_type: block_annotations.block_type || block_type_hint
+        body_type: block_annotations.block_type
       )
       break_context = TypeInference::Context::BreakContext.new(
         break_type: break_type || AST::Builtin.any_type,
-        next_type: block_context.body_type || AST::Builtin.any_type
+        next_type: block_next_type || AST::Builtin.any_type
       )
 
-      self_type = block_annotations.self_type || block_self_hint || self.self_type
+      self_type = block_self_hint || self.self_type
       module_context = self.module_context
 
       if implements = block_annotations.implement_module_annotation
         module_context = default_module_context(implements.name, nesting: nesting)
-
         self_type = module_context.module_type
       end
 
       if annotation_self_type = block_annotations.self_type
         self_type = annotation_self_type
+      end
+
+      # self_type here means the top-level `self` type because of the `Interface::Builder` implementation
+      if self_type
+        self_type = expand_self(self_type)
       end
 
       self.class.new(
@@ -4541,6 +4622,20 @@ module Steep
     def synthesize_block(node:, block_type_hint:, block_body:)
       if block_body
         body_type, _, context = synthesize(block_body, hint: block_context&.body_type || block_type_hint)
+
+        if annotated_body_type = block_context&.body_type
+          if result = no_subtyping?(sub_type: body_type, super_type: annotated_body_type)
+            typing.add_error(
+              Diagnostic::Ruby::BlockBodyTypeMismatch.new(
+                node: node,
+                expected: annotated_body_type,
+                actual: body_type,
+                result: result
+              )
+            )
+          end
+          body_type = annotated_body_type
+        end
 
         range = block_body.loc.expression.end_pos..node.loc.end.begin_pos
         typing.cursor_context.set(range, context)
@@ -5176,6 +5271,44 @@ module Steep
       else
         if name = type_name(type)
           checker.factory.instance_type(name)
+        end
+      end
+    end
+
+    def check_deprecation_global(name, node, location)
+      if global_entry = checker.factory.env.global_decls[name]
+        if (_, message = AnnotationsHelper.deprecated_annotation?(global_entry.decl.annotations))
+          typing.add_error(
+            Diagnostic::Ruby::DeprecatedReference.new(
+              node: node,
+              location: location,
+              message: message
+            )
+          )
+        end
+      end
+    end
+
+    def check_deprecation_constant(name, node, location)
+      entry = checker.builder.factory.env.constant_entry(name)
+
+      annotations =
+        case entry
+        when RBS::Environment::ModuleEntry, RBS::Environment::ClassEntry
+          entry.decls.flat_map { _1.decl.annotations }
+        when RBS::Environment::ConstantEntry, RBS::Environment::ClassAliasEntry, RBS::Environment::ModuleAliasEntry
+          entry.decl.annotations
+        end
+
+      if annotations
+        if (_, message = AnnotationsHelper.deprecated_annotation?(annotations))
+          typing.add_error(
+            Diagnostic::Ruby::DeprecatedReference.new(
+              node: node,
+              location: location,
+              message: message
+            )
+          )
         end
       end
     end

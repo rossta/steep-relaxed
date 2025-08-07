@@ -41,10 +41,10 @@ Gem::Specification.new do |spec|
   spec.add_runtime_dependency "activesupport", ">= 4.2"
   spec.add_runtime_dependency "rainbow", ">= 2.2.2", "< 4.0"
   spec.add_runtime_dependency "listen", "~> 3.0"
-  spec.add_runtime_dependency "language_server-protocol", ">= 3.15", "< 4.0"
-  spec.add_runtime_dependency "rbs-relaxed", "~> 3.8"
+  spec.add_runtime_dependency "language_server-protocol", ">= 3.17.0.4", "< 4.0"
+  spec.add_runtime_dependency "rbs-relaxed", "~> 3.9"
   spec.add_runtime_dependency "concurrent-ruby", ">= 1.1.10"
-  spec.add_runtime_dependency "terminal-table", ">= 2", "< 4"
+  spec.add_runtime_dependency "terminal-table", ">= 2", "< 5"
 
   # Stdgem dependencies omitted for compatibility with legacy environments
   # spec.add_runtime_dependency "securerandom", ">= 0.1"
@@ -53,4 +53,6 @@ Gem::Specification.new do |spec|
   # spec.add_runtime_dependency "fileutils", ">= 1.1.0"
   # spec.add_runtime_dependency "strscan", ">= 1.0.0"
   # spec.add_runtime_dependency "csv", ">= 3.0.9"
+  # spec.add_runtime_dependency "uri", ">= 0.12.0"
+  # spec.add_runtime_dependency "mutex_m", ">= 0.3.0"
 end

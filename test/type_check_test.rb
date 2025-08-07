@@ -136,18 +136,14 @@ class TypeCheckTest < Minitest::Test
           - range:
               start:
                 line: 4
-                character: 11
+                character: 4
               end:
                 line: 4
-                character: 23
+                character: 47
             severity: ERROR
-            message: |-
-              Cannot allow block body have type `::Integer` because declared as type `::String`
-                ::Integer <: ::String
-                  ::Numeric <: ::String
-                    ::Object <: ::String
-                      ::BasicObject <: ::String
-            code: Ruby::BlockBodyTypeMismatch
+            message: 'Assertion cannot hold: no relationship between inferred type (`^(::Integer)
+              -> ::Integer`) and asserted type (`^(::Integer) -> ::String`)'
+            code: Ruby::FalseAssertion
       YAML
     )
   end
@@ -1500,6 +1496,66 @@ class TypeCheckTest < Minitest::Test
     )
   end
 
+  def test_type_narrowing__union_send
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Object
+            def present?: () -> bool
+          end
+
+          class NilClass
+            def present?: () -> false
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          a = [1].first
+          a + 1 if a.present?
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_type_narrowing__union_send2
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Foo
+            attr_reader foo: String?
+
+            def foo!: () -> void
+          end
+
+          class Bar
+            attr_reader foo: nil
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          foo = rand > 0.1 ? Foo.new : Bar.new
+          if x = foo.foo
+            foo.foo!
+            x + ""
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+
   def test_argument_error__unexpected_unexpected_positional_argument
     run_type_check_test(
       signatures: {
@@ -2553,16 +2609,6 @@ class TypeCheckTest < Minitest::Test
             severity: ERROR
             message: Type `(::String | nil)` does not have method `+`
             code: Ruby::NoMethod
-          - range:
-              start:
-                line: 8
-                character: 8
-              end:
-                line: 8
-                character: 9
-            severity: ERROR
-            message: Type `(::Integer | nil)` does not have method `+`
-            code: Ruby::NoMethod
       YAML
     )
   end
@@ -2954,6 +3000,33 @@ class TypeCheckTest < Minitest::Test
     )
   end
 
+  def test_self_type_union_assertion
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Foo
+            def bar: (bool) -> self?
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class Foo
+            def bar(var)
+              return nil if var
+              self
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
   def test_case_when__no_subject__assignment_in_when__no_else
     run_type_check_test(
       signatures: {
@@ -3079,6 +3152,694 @@ class TypeCheckTest < Minitest::Test
                 character: 3
             severity: ERROR
             message: Type `(::Integer | nil)` does not have method `+`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_deprecated_method
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Foo
+            %a{steep:deprecated} def foo: () -> void
+
+            %a{deprecated:Don't use bar} def bar: () -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          Foo.new.foo()
+
+          Foo.new.bar()
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 1
+                character: 8
+              end:
+                line: 1
+                character: 11
+            severity: ERROR
+            message: The method is deprecated
+            code: Ruby::DeprecatedReference
+          - range:
+              start:
+                line: 3
+                character: 8
+              end:
+                line: 3
+                character: 11
+            severity: ERROR
+            message: 'The method is deprecated: Don''t use bar'
+            code: Ruby::DeprecatedReference
+      YAML
+    )
+  end
+
+  def test_deprecated_method_alias
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Foo
+            def foo: () -> void
+
+            %a{steep:deprecated} alias bar foo
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          Foo.new.bar()
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 1
+                character: 8
+              end:
+                line: 1
+                character: 11
+            severity: ERROR
+            message: The method is deprecated
+            code: Ruby::DeprecatedReference
+      YAML
+    )
+  end
+
+  def test_deprecated_method_overload
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Foo
+            def foo: () -> void
+                   | %a{deprecated} (Integer) -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          Foo.new.foo()
+          Foo.new.foo(1)
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 2
+                character: 8
+              end:
+                line: 2
+                character: 11
+            severity: ERROR
+            message: The method is deprecated
+            code: Ruby::DeprecatedReference
+      YAML
+    )
+  end
+
+  def test_deprecated_class_module
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          %a{deprecated} class Foo
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          Foo
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 1
+                character: 0
+              end:
+                line: 1
+                character: 3
+            severity: ERROR
+            message: The constant is deprecated
+            code: Ruby::DeprecatedReference
+      YAML
+    )
+  end
+
+  def test_deprecated_class_module_alias
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          %a{deprecated} class Foo
+          end
+
+          class Bar = Foo
+
+          %a{deprecated} class Baz = Foo
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          Bar
+          Baz
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 2
+                character: 0
+              end:
+                line: 2
+                character: 3
+            severity: ERROR
+            message: The constant is deprecated
+            code: Ruby::DeprecatedReference
+      YAML
+    )
+  end
+
+  def test_deprecated_constant
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          %a{deprecated} FOO: Integer
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          FOO = 123
+          FOO
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 1
+                character: 0
+              end:
+                line: 1
+                character: 3
+            severity: ERROR
+            message: The constant is deprecated
+            code: Ruby::DeprecatedReference
+          - range:
+              start:
+                line: 2
+                character: 0
+              end:
+                line: 2
+                character: 3
+            severity: ERROR
+            message: The constant is deprecated
+            code: Ruby::DeprecatedReference
+      YAML
+    )
+  end
+
+  def test_deprecated_global
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          %a{deprecated} $FOO: Integer
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          $FOO = 123
+          $FOO
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 1
+                character: 0
+              end:
+                line: 1
+                character: 4
+            severity: ERROR
+            message: The global variable is deprecated
+            code: Ruby::DeprecatedReference
+          - range:
+              start:
+                line: 2
+                character: 0
+              end:
+                line: 2
+                character: 4
+            severity: ERROR
+            message: The global variable is deprecated
+            code: Ruby::DeprecatedReference
+      YAML
+    )
+  end
+
+  def test_class_module_decl__deprecated
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          %a{deprecated} class Foo end
+          %a{deprecated} module Bar end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class Foo
+          end
+          module Bar
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 1
+                character: 6
+              end:
+                line: 1
+                character: 9
+            severity: ERROR
+            message: The constant is deprecated
+            code: Ruby::DeprecatedReference
+          - range:
+              start:
+                line: 3
+                character: 7
+              end:
+                line: 3
+                character: 10
+            severity: ERROR
+            message: The constant is deprecated
+            code: Ruby::DeprecatedReference
+      YAML
+    )
+  end
+
+  def test_argument_forwarding__dynamic
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Foo
+            def foo: (?) -> void
+
+            def bar: (Integer) -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class Foo
+            def foo(...)
+              bar(...)
+            end
+
+            def bar(x)
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_argument_forwarding__undeclared
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Foo
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class Foo
+            def foo(...)
+              1.to_s(...)
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 2
+                character: 6
+              end:
+                line: 2
+                character: 9
+            severity: ERROR
+            message: Method `::Foo#foo` is not declared in RBS
+            code: Ruby::UndeclaredMethodDefinition
+      YAML
+    )
+  end
+
+  def test_type_check_untyped_calls_with_blocks
+    run_type_check_test(
+      signatures: {
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          Foo
+            .foo {}
+            .foo {}
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 1
+                character: 0
+              end:
+                line: 1
+                character: 3
+            severity: ERROR
+            message: 'Cannot find the declaration of constant: `Foo`'
+            code: Ruby::UnknownConstant
+      YAML
+    )
+  end
+
+  def test_generics_optional_arg #: void
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Test
+            def foo: [T] (?T) { () -> T } -> T
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          Test.new.foo(1) { 1 }.fooo
+          Test.new.foo() { 1 }.fooo
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 1
+                character: 22
+              end:
+                line: 1
+                character: 26
+            severity: ERROR
+            message: Type `::Integer` does not have method `fooo`
+            code: Ruby::NoMethod
+          - range:
+              start:
+                line: 2
+                character: 21
+              end:
+                line: 2
+                character: 25
+            severity: ERROR
+            message: Type `::Integer` does not have method `fooo`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_self_type__block_hint
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Test
+            def self.foo: () { () [self: self] -> void } -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class Test
+            # @dynamic self.foo
+
+            foo { no_such_method }
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 4
+                character: 8
+              end:
+                line: 4
+                character: 22
+            severity: ERROR
+            message: Type `singleton(::Test)` does not have method `no_such_method`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_self_type__block_annotation
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Test
+            def self.foo: () { () [self: self] -> void } -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class Test
+            # @dynamic self.foo
+
+            foo do
+              # @type self: singleton(Test)
+              no_such_method
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 6
+                character: 4
+              end:
+                line: 6
+                character: 18
+            severity: ERROR
+            message: Type `singleton(::Test)` does not have method `no_such_method`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_self_type__lambda_hint
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Test
+            def self.foo: (^() [self: self] -> void) -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class Test
+            # @dynamic self.foo
+
+            foo(-> { no_such_method })
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 4
+                character: 11
+              end:
+                line: 4
+                character: 25
+            severity: ERROR
+            message: Type `singleton(::Test)` does not have method `no_such_method`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_block_type_comment__call
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          [1,2,3].map do |x|
+            # @type block: String
+            123
+          end.ffffffffff
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 1
+                character: 12
+              end:
+                line: 4
+                character: 3
+            severity: ERROR
+            message: |-
+              Cannot allow block body have type `::Integer` because declared as type `::String`
+                ::Integer <: ::String
+                  ::Numeric <: ::String
+                    ::Object <: ::String
+                      ::BasicObject <: ::String
+            code: Ruby::BlockBodyTypeMismatch
+          - range:
+              start:
+                line: 4
+                character: 4
+              end:
+                line: 4
+                character: 14
+            severity: ERROR
+            message: Type `::Array[::String]` does not have method `ffffffffff`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_block_type_comment__untyped
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          (_ = 123).foo do
+            # @type block: String
+            123
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 1
+                character: 14
+              end:
+                line: 4
+                character: 3
+            severity: ERROR
+            message: |-
+              Cannot allow block body have type `::Integer` because declared as type `::String`
+                ::Integer <: ::String
+                  ::Numeric <: ::String
+                    ::Object <: ::String
+                      ::BasicObject <: ::String
+            code: Ruby::BlockBodyTypeMismatch
+      YAML
+    )
+  end
+
+  def test_block_type_comment__lambda
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          x = -> do
+            # @type block: String
+            123
+          end
+          x.ffffffffff
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 1
+                character: 7
+              end:
+                line: 4
+                character: 3
+            severity: ERROR
+            message: |-
+              Cannot allow block body have type `::Integer` because declared as type `::String`
+                ::Integer <: ::String
+                  ::Numeric <: ::String
+                    ::Object <: ::String
+                      ::BasicObject <: ::String
+            code: Ruby::BlockBodyTypeMismatch
+          - range:
+              start:
+                line: 5
+                character: 2
+              end:
+                line: 5
+                character: 12
+            severity: ERROR
+            message: Type `^() -> ::String` does not have method `ffffffffff`
             code: Ruby::NoMethod
       YAML
     )

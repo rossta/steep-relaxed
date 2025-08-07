@@ -80,7 +80,7 @@ module Steep
     # end
     # ```
     #
-    def no_subtyping?: (sub_type: AST::Types::t, super_type: AST::Types::t, ?constraints: Subtyping::Constraints) -> Subtyping::Result::Base?
+    def no_subtyping?: (sub_type: AST::Types::t, super_type: AST::Types::t, ?constraints: Subtyping::Constraints) -> Subtyping::Result::t?
 
     def for_new_method: (Symbol method_name, Parser::AST::Node node, args: Array[Parser::AST::Node], self_type: untyped, definition: RBS::Definition?) -> TypeConstruction
 
@@ -182,7 +182,7 @@ module Steep
     #
     # * `send_node` can be `:send`, `:super`, or `:zsuper`
     # * `node` can be `:send`, `:block`, `:super`, or `:zsuper`
-    # * Specify `unwrap` keyword `true` to type check safe-navigation-operator, that unwraps the type of reeiver automatically and make the return type optional
+    # * Specify `unwrap` keyword `true` to type check safe-navigation-operator, that unwraps the type of receiver automatically and make the return type optional
     #
     def type_send: (
       Parser::AST::Node node,
@@ -212,11 +212,11 @@ module Steep
       hint: Types::t?
     ) -> Pair
 
-    # The third step to type check method calls, which tries all of the overlods defined for the method
+    # The third step to type check method calls, which tries all of the overloads defined for the method
     #
     # * It receives the `Shape::Entry` object that represents an method entry of a shape
     # * Returns `nil` when it cannot find suitable one from more than one overloads
-    #   * It means the type checker can report only *no suitable overlod detected for this args* 😫
+    #   * It means the type checker can report only *no suitable overload detected for this args* 😫
     #
     def type_method_call: (
       Parser::AST::Node node,
@@ -338,7 +338,7 @@ module Steep
     # * `body_node` Block body node
     # * `block_params` BlockParams object
     # * `block_param_hint` Type hint of the block parameters
-    # * `block_type_hint` Type hint of the block body
+    # * `block_next_type` Type of `next` from the block
     # * `block_block_hint` Type hint of the block that will be given to the block
     # * `block_annotations` Annotations given to the block body
     # * `node_type_hint` Type hint of block call node
@@ -347,7 +347,7 @@ module Steep
         Parser::AST::Node? body_node,
         block_params: TypeInference::BlockParams,
         block_param_hint: Interface::Function::Params?,
-        block_type_hint: AST::Types::t?,
+        block_next_type: AST::Types::t?,
         block_block_hint: Interface::Block?,
         block_annotations: AST::Annotation::Collection,
         node_type_hint: AST::Types::t?,
@@ -530,10 +530,18 @@ module Steep
     #
     def pure_send?: (TypeInference::MethodCall::Typed call, Parser::AST::Node? receiver, Array[Parser::AST::Node] arguments) -> bool
 
+    def deprecated_send?: (TypeInference::MethodCall::Typed call) -> [RBS::AST::Annotation, String?]?
+
     def type_name: (AST::Types::t) -> RBS::TypeName?
 
     def singleton_type: (AST::Types::t) -> AST::Types::t?
 
     def instance_type: (AST::Types::t) -> AST::Types::t?
+
+    # Check if the global variable is deprecated and report diagnostic if so
+    def check_deprecation_global: (Symbol name, Parser::AST::Node, Parser::Source::Range) -> void
+
+    # Check if the constant is deprecated and report diagnostic if so
+    def check_deprecation_constant: (RBS::TypeName, Parser::AST::Node, Parser::Source::Range) -> void
   end
 end
