@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    steep-relaxed (2.0.0.0.beta1)
+    steep-relaxed (2.0.0.0)
       concurrent-ruby (>= 1.1.10)
       csv (>= 3.0.9)
       json (>= 2.1.0)
