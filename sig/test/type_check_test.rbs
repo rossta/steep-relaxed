@@ -21,10 +21,11 @@ class TypeCheckTest < Minitest::Test
 
   # @rbs signatures: Hash[String, String]
   # @rbs code: Hash[String, String]
+  # @rbs inline_code: Hash[String, String]
   # @rbs expectations: String?
   # @rbs &block: ? (Hash[String, Steep::Typing]) -> void
   # @rbs return: void
-  def run_type_check_test: (?signatures: Hash[String, String], ?code: Hash[String, String], ?expectations: String?) ?{ (Hash[String, Steep::Typing]) -> void } -> void
+  def run_type_check_test: (?signatures: Hash[String, String], ?code: Hash[String, String], ?inline_code: Hash[String, String], ?expectations: String?) ?{ (Hash[String, Steep::Typing]) -> void } -> void
 
   def test_setter_type: () -> untyped
 
@@ -129,6 +130,8 @@ class TypeCheckTest < Minitest::Test
   def test_underscore_opt_param: () -> untyped
 
   def test_rescue_assignment: () -> untyped
+
+  def test_ensure_annotation: () -> untyped
 
   def test_defined?: () -> untyped
 
@@ -237,4 +240,54 @@ class TypeCheckTest < Minitest::Test
   def test_block_type_comment__untyped: () -> untyped
 
   def test_block_type_comment__lambda: () -> untyped
+
+  def test_splat_block: () -> untyped
+
+  def test_unnamed_splat_method_definition: () -> untyped
+
+  def test_unnamed_kwsplat_method_definition: () -> untyped
+
+  def test_inline__module_include: () -> untyped
+
+  def test_inline__attributes: () -> untyped
+
+  def test_inline__inheritance: () -> untyped
+
+  def test_inline__instance_variables: () -> untyped
+
+  def test_inline_constant_declaration_basic: () -> untyped
+
+  def test_inline_constant_declaration_type_mismatch: () -> untyped
+
+  def test_inline_constant_declaration_with_complex_type: () -> untyped
+
+  def test_inline_constant_declaration_nested_class: () -> untyped
+
+  def test_inline_constant_declaration_module: () -> untyped
+
+  def test_inline_constant_declaration_with_nil: () -> untyped
+
+  def test_inline_constant_declaration_generic_type: () -> untyped
+
+  def test_inline_constant_declaration_inheritance: () -> untyped
+
+  def test_inline_constant_declaration_top_level: () -> untyped
+
+  def test_inline_constant_declaration_type_inference: () -> untyped
+
+  def test_inline_class_alias_basic: () -> untyped
+
+  def test_inline_module_alias_basic: () -> untyped
+
+  def test_inline_class_alias_with_explicit_type: () -> untyped
+
+  def test_inline_module_alias_with_explicit_type: () -> untyped
+
+  def test_inline_class_alias_nested: () -> untyped
+
+  def test_inline_class_alias_type_name: () -> untyped
+
+  def test_tuple_type_with_if_branch: () -> untyped
+
+  def test_or_asgn_send_chain: () -> untyped
 end

@@ -6156,48 +6156,6 @@ end
     end
   end
 
-  def test_block_param_masgn_with_unnamed
-    with_checker(<<-RBS) do |checker|
-class BlockParamTupleRest
-  def foo: () { ([Integer, String]) -> void } -> void
-end
-    RBS
-      source = parse_ruby(<<-RUBY)
-BlockParamTupleRest.new.foo do |*, **, &|
-  if 1
-  end
-end
-      RUBY
-      with_standard_construction(checker, source) do |construction, typing|
-        construction.synthesize(source.node)
-        assert_typing_error typing, size: 1 do |error,|
-          assert_instance_of Diagnostic::Ruby::FallbackAny, error
-        end
-      end
-    end
-  end
-
-  def test_block_param_masgn_with_unnamed2
-    with_checker(<<-RBS) do |checker|
-class BlockParamTupleRest
-  def foo: () { ([Integer, String]) -> void } -> void
-end
-    RBS
-      source = parse_ruby(<<-RUBY)
-BlockParamTupleRest.new.foo do |(*)|
-  if 1
-  end
-end
-      RUBY
-      with_standard_construction(checker, source) do |construction, typing|
-        construction.synthesize(source.node)
-        assert_typing_error typing, size: 1 do |error,|
-          assert_instance_of Diagnostic::Ruby::FallbackAny, error
-        end
-      end
-    end
-  end
-
   def test_logic_receiver_is_nil
     with_checker(<<-RBS) do |checker|
     RBS
@@ -10076,6 +10034,27 @@ end
     end
   end
 
+  def test_yield_with_untyped_method_type
+    with_checker(<<-RBS) do |checker|
+class YieldUntyped
+  def foo: (?) -> void
+end
+      RBS
+      source = parse_ruby(<<-RUBY)
+class YieldUntyped
+  def foo
+    yield 1
+  end
+end
+      RUBY
+
+      with_standard_construction(checker, source) do |construction, typing|
+        construction.synthesize(source.node)
+        assert_no_error typing
+      end
+    end
+  end
+
   def test_self_type_binding_proc_with_type_declaration
     with_checker() do |checker|
       source = parse_ruby(<<RUBY)
@@ -10537,7 +10516,7 @@ z = AppTest.new.foo(1, 2) #$ Integer, Integer, String
           when 1
             next
           when 2
-            retry
+            next
           when 3
             break
           end

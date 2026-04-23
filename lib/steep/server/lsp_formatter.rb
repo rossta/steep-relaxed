@@ -19,10 +19,10 @@ module Steep
 
       def format_hover_content(content)
         case content
-        when HoverProvider::Ruby::VariableContent
+        when HoverProvider::VariableContent
           local_variable(content.name, content.type)
 
-        when HoverProvider::Ruby::MethodCallContent
+        when HoverProvider::MethodCallContent
           io = StringIO.new
           call = content.method_call
 
@@ -76,7 +76,7 @@ module Steep
 
           io.string
 
-        when HoverProvider::Ruby::DefinitionContent
+        when HoverProvider::DefinitionContent
           io = StringIO.new
 
           method_name =
@@ -115,13 +115,13 @@ module Steep
           )
 
           io.string
-        when HoverProvider::Ruby::ConstantContent
+        when HoverProvider::ConstantContent
           io = StringIO.new
 
           decl_summary =
             case
             when decl = content.class_decl
-              declaration_summary(decl.primary.decl)
+              declaration_summary(decl.primary_decl)
             when decl = content.constant_decl
               declaration_summary(decl.decl)
             when decl = content.class_alias
@@ -144,14 +144,14 @@ module Steep
           end
 
           io.string
-        when HoverProvider::Ruby::TypeContent
+        when HoverProvider::TypeContent
           <<~MD
             ```rbs
             #{content.type}
             ```
           MD
 
-        when HoverProvider::Ruby::TypeAssertionContent
+        when HoverProvider::TypeAssertionContent
           <<~MD
             ```rbs
             #{content.asserted_type}
@@ -160,7 +160,7 @@ module Steep
             ↑ Converted from `#{content.original_type.to_s}`
           MD
 
-        when HoverProvider::RBS::TypeAliasContent, HoverProvider::RBS::InterfaceContent
+        when HoverProvider::TypeAliasContent, HoverProvider::InterfaceTypeContent
           io = StringIO.new()
 
           io.puts <<~MD
@@ -178,7 +178,7 @@ module Steep
 
           io.string
 
-        when HoverProvider::RBS::ClassContent
+        when HoverProvider::ClassTypeContent
           io = StringIO.new
 
           io << <<~MD
@@ -187,7 +187,15 @@ module Steep
           ```
           MD
 
-          if content.decl.comment
+          comment =
+            case content.decl
+            when RBS::AST::Declarations::Base
+              content.decl.comment
+            when RBS::AST::Ruby::Declarations::Base
+              nil
+            end
+
+          if comment
             io.puts "----"
 
             class_name =
@@ -235,10 +243,24 @@ module Steep
         when Services::CompletionProvider::InstanceVariableItem
           instance_variable(item.identifier, item.type)
         when Services::CompletionProvider::SimpleMethodNameItem
-          format_method_item_doc(item.method_types, [], { item.method_name => item.method_member.comment })
+          item_comment =
+            case item.method_member
+            when RBS::AST::Members::Base
+              item.method_member.comment
+            when RBS::AST::Ruby::Members::Base
+              nil
+            end
+          format_method_item_doc(item.method_types, [], { item.method_name => item_comment })
         when Services::CompletionProvider::ComplexMethodNameItem
           method_names = item.method_names.map(&:relative).uniq
-          comments = item.method_definitions.transform_values {|member| member.comment }
+          comments = item.method_definitions.transform_values do |member|
+            case member
+            when RBS::AST::Members::Base
+              member.comment
+            when RBS::AST::Ruby::Members::Base
+              nil
+            end
+          end
           format_method_item_doc(item.method_types, method_names, comments)
         when Services::CompletionProvider::GeneratedMethodNameItem
           format_method_item_doc(item.method_types, [], {}, "🤖 Generated method for receiver type")
@@ -419,6 +441,20 @@ module Steep
           "#{decl.name}: #{decl.type}"
         when RBS::AST::Declarations::Constant
           "#{decl.name.relative!}: #{decl.type}"
+        when RBS::AST::Ruby::Declarations::ClassDecl
+          "class #{decl.class_name.relative!}"
+        when RBS::AST::Ruby::Declarations::ModuleDecl
+          "module #{decl.module_name.relative!}"
+        when RBS::AST::Ruby::Declarations::ConstantDecl
+          "#{decl.constant_name.relative!}: #{decl.type}"
+        when RBS::AST::Ruby::Declarations::ClassModuleAliasDecl
+          keyword =
+            if decl.annotation.is_a?(RBS::AST::Ruby::Annotations::ClassAliasAnnotation)
+              "class"
+            else
+              "module"
+            end
+          "#{keyword} #{decl.new_name} = #{decl.old_name}"
         end
       end
 

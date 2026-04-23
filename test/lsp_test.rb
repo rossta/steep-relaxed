@@ -17,6 +17,7 @@ class LSPTest < Minitest::Test
     end
   end
 
+  # @rbs () { (LSPClient) -> void } -> void
   def start_server()
     Open3.popen2(langserver_command(current_dir + "Steepfile")) do |stdin, stdout|
       reader = LanguageServer::Protocol::Transport::Io::Reader.new(stdout)
@@ -29,6 +30,7 @@ class LSPTest < Minitest::Test
     end
   end
 
+  # @rbs (String, String) -> void
   def write_file(path, content)
     (current_dir + path).parent.mkpath
     (current_dir + path).write(content)
@@ -46,8 +48,7 @@ target :lib do
   end
 
   group :main do
-    check "lib/main"
-    signature "sig/main"
+    check "lib/main", inline: true
   end
 end
 
@@ -71,10 +72,6 @@ RUBY
         class Main
         end
       RUBY
-      write_file("sig/main/main.rbs", <<~RBS)
-        class Main
-        end
-      RBS
       write_file("test/core_test.rb", <<~RUBY)
         class CoreTest
         end
@@ -102,7 +99,6 @@ RUBY
           assert_operator client.diagnostics, :key?, Pathname("lib/core/core.rb")
           refute_operator client.diagnostics, :key?, Pathname("lib/main/main.rb")
           assert_operator client.diagnostics, :key?, Pathname("sig/core/core.rbs")
-          refute_operator client.diagnostics, :key?, Pathname("sig/main/main.rbs")
           refute_operator client.diagnostics, :key?, Pathname("test/core_test.rb")
           refute_operator client.diagnostics, :key?, Pathname("test/main_test.rb")
           refute_operator client.diagnostics, :key?, Pathname("sig/test/test.rbs")
@@ -122,7 +118,6 @@ RUBY
           assert_operator client.diagnostics, :key?, Pathname("lib/core/core.rb")
           refute_operator client.diagnostics, :key?, Pathname("lib/main/main.rb")
           refute_operator client.diagnostics, :key?, Pathname("sig/core/core.rbs")
-          refute_operator client.diagnostics, :key?, Pathname("sig/main/main.rbs")
           refute_operator client.diagnostics, :key?, Pathname("test/core_test.rb")
           refute_operator client.diagnostics, :key?, Pathname("test/main_test.rb")
           refute_operator client.diagnostics, :key?, Pathname("sig/test/test.rbs")
@@ -145,7 +140,6 @@ RUBY
           assert_operator client.diagnostics, :key?, Pathname("lib/core/core.rb")
           assert_operator client.diagnostics, :key?, Pathname("lib/main/main.rb")
           assert_operator client.diagnostics, :key?, Pathname("sig/core/core.rbs")
-          assert_operator client.diagnostics, :key?, Pathname("sig/main/main.rbs")
           refute_operator client.diagnostics, :key?, Pathname("test/core_test.rb")
           refute_operator client.diagnostics, :key?, Pathname("test/main_test.rb")
           refute_operator client.diagnostics, :key?, Pathname("sig/test/test.rbs")
@@ -169,7 +163,6 @@ RUBY
           refute_operator client.diagnostics, :key?, Pathname("lib/core/core.rb")
           refute_operator client.diagnostics, :key?, Pathname("lib/main/main.rb")
           refute_operator client.diagnostics, :key?, Pathname("sig/core/core.rbs")
-          refute_operator client.diagnostics, :key?, Pathname("sig/main/main.rbs")
           assert_operator client.diagnostics, :key?, Pathname("test/core_test.rb")
           assert_operator client.diagnostics, :key?, Pathname("test/main_test.rb")
           assert_operator client.diagnostics, :key?, Pathname("sig/test/test.rbs")
@@ -259,9 +252,8 @@ RUBY
         client.change_watched_file("sig/core/core.rbs")
 
         finally_holds(timeout: 3) do
-          # `core` groups are type checked
           assert_operator client.diagnostics, :key?, Pathname("lib/core/core.rb")
-          refute_operator client.diagnostics, :key?, Pathname("lib/main/main.rb")
+          assert_operator client.diagnostics, :key?, Pathname("lib/main/main.rb")
           assert_operator client.diagnostics, :key?, Pathname("sig/core/core.rbs")
           assert_operator client.diagnostics, :key?, Pathname("sig/main/main.rbs")
           refute_operator client.diagnostics, :key?, Pathname("test/core_test.rb")
@@ -292,6 +284,10 @@ target :lib do
     check "lib/main"
     signature "sig/main"
   end
+
+  group :inline do
+    check "lib/inline", inline: true
+  end
 end
 
 target :test do
@@ -318,6 +314,13 @@ RUBY
         class Main__123
         end
       RBS
+      write_file("lib/inline/person.rb", <<~RUBY)
+        class InlinePerson
+          def greet #: () -> String
+            "Hello, \#{@name}!"
+          end
+        end
+      RUBY
       write_file("test/core_test.rb", <<~RUBY)
         class CoreTest
         end
@@ -362,6 +365,17 @@ RUBY
           client.workspace_symbol("Main") do |symbols|
             assert symbols.find { _1[:name] == "Main_1234"}
             refute symbols.find { _1[:name] == "Main_123"}
+          end
+        end
+
+        # Test inline RBS declarations
+        client.open_file("lib/inline/person.rb")
+
+        finally_holds(timeout: 3) do
+          # Test that inline class declaration can be found
+          client.workspace_symbol("InlinePerson") do |symbols|
+            assert symbols.any? { _1[:name] == "InlinePerson" }
+            assert symbols.any? { _1[:name] == "#greet" }
           end
         end
       ensure

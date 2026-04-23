@@ -41,12 +41,25 @@ module Steep
         new(text: string)
       end
 
+      def self.from_lsp(changes)
+        changes.map do |change|
+          content_range =
+            if range = change[:range]
+              [
+                range[:start].yield_self {|pos| Services::ContentChange::Position.new(line: pos[:line] + 1, column: pos[:character]) },
+                end_pos = range[:end].yield_self {|pos| Services::ContentChange::Position.new(line: pos[:line] + 1, column: pos[:character]) }
+              ] #: range
+            end
+          Services::ContentChange.new(range: content_range, text: change[:text])
+        end
+      end
+
       def apply_to(text)
         if range
           text = text.dup
           start_pos, end_pos = range
 
-          buf = RBS::Buffer.new(name: :_, content: text)
+          buf = RBS::Buffer.new(name: Pathname("_"), content: text)
           start_pos = buf.loc_to_pos([start_pos.line, start_pos.column])
           end_pos = buf.loc_to_pos([end_pos.line, end_pos.column])
 

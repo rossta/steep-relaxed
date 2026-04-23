@@ -21,7 +21,7 @@ module Steep
             last_start = ignore
           when AST::Ignore::IgnoreEnd
             if last_start
-              ignored_ranges << (last_start.line..ignore.line)
+              ignored_ranges << [last_start, ignore]
               last_start = nil
             else
               error_ignores << ignore
@@ -40,18 +40,28 @@ module Steep
         end
       end
 
+      def each_ignore(&block)
+        if block
+          ignored_ranges.each(&block)
+          ignored_lines.each_value(&block)
+        else
+          enum_for(:each_ignore)
+        end
+      end
+
       def ignore?(start_line, end_line, code)
         if ignore = ignored_lines.fetch(start_line, nil)
-          ignore_code?(ignore, code) and return true
+          ignore_code?(ignore, code) and return ignore
         end
 
         if start_line != end_line
           if ignore = ignored_lines.fetch(end_line, nil)
-            ignore_code?(ignore, code) and return true
+            ignore_code?(ignore, code) and return ignore
           end
         end
 
-        ignored_ranges.any? do |range|
+        ignored_ranges.find do |ignore_start, ignore_end|
+          range = ignore_start.line..ignore_end.line
           range.cover?(start_line) && range.cover?(end_line)
         end
       end

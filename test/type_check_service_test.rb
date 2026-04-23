@@ -20,6 +20,10 @@ class TypeCheckServiceTest < Minitest::Test
           signature "sig/main.rbs"
         end
 
+        target :inline do
+          check "lib/inline.rb", inline: true
+        end
+
         target :test do
           unreferenced!
 
@@ -36,6 +40,7 @@ class TypeCheckServiceTest < Minitest::Test
       Pathname("sig/core.rbs") => [ContentChange.string("")],
       Pathname("lib/main.rb") => [ContentChange.string("")],
       Pathname("sig/main.rbs") => [ContentChange.string("")],
+      Pathname("lib/inline.rb") => [ContentChange.string("")],
       Pathname("test/core_test.rb") => [ContentChange.string("")],
       Pathname("sig/core_test.rbs") => [ContentChange.string("")],
     }
@@ -106,8 +111,8 @@ RUBY
       service.source_files[Pathname("lib/core.rb")].tap do |file|
         assert_any!(file.errors, size: 1) do |error|
           assert_instance_of Diagnostic::Ruby::SyntaxError, error
-          assert_equal 2, error.location.line
-          assert_equal 0, error.location.column
+          assert_equal 1, error.location.line
+          assert_equal 13, error.location.column
           assert_equal 2, error.location.last_line
           assert_equal 0, error.location.last_column
         end
@@ -373,7 +378,7 @@ RBS
 
       # SyntaxError is reported to all of the targets
       service.diagnostics[Pathname("sig/core.rbs")].tap do |errors|
-        assert_equal 3, errors.size
+        assert_equal 4, errors.size
         errors.each do |error|
           assert_instance_of Diagnostic::Signature::SyntaxError, error
         end
@@ -451,4 +456,429 @@ RBS
       )
     end
   end
+
+  def test_typecheck__ignore_redundant
+    service = Services::TypeCheckService.new(project: project)
+    service.update(changes: reset_changes)
+
+    {
+      Pathname("sig/core.rbs") => [ContentChange.string(<<RBS)],
+class A
+  def foo: -> void
+end
+RBS
+      Pathname("lib/core.rb") => [ContentChange.string(<<RUBY)],
+class A
+  def foo # steep:ignore
+  end
+end
+
+1+"" # steep:ignore
+
+# steep:ignore:start
+1+2
+# steep:ignore:end
+RUBY
+    }.tap do |changes|
+      service.update(changes: changes)
+
+      service.typecheck_source(path: Pathname("lib/core.rb"), target: project.targets.find { _1.name == :core })
+
+      assert_any!(service.diagnostics[Pathname("lib/core.rb")]) do |error|
+        assert_instance_of Diagnostic::Ruby::RedundantIgnoreComment, error
+        assert_equal "steep:ignore", error.location.source
+      end
+
+      assert_any!(service.diagnostics[Pathname("lib/core.rb")]) do |error|
+        assert_instance_of Diagnostic::Ruby::RedundantIgnoreComment, error
+        assert_equal "steep:ignore:start\n1+2\n# steep:ignore:end", error.location.source
+      end
+    end
+  end
+
+  def test_update__inline
+    service = Services::TypeCheckService.new(project: project)
+
+    {
+      Pathname("lib/inline.rb") => [ContentChange.string(<<RBS)],
+class Inline
+  def foo #: String
+    ""
+  end
+end
+RBS
+    }.tap do |changes|
+      service.update(changes: changes)
+
+      assert_operator service.source_files, :key?, Pathname("lib/inline.rb")
+
+      assert_operator service, :signature_file?, Pathname("lib/inline.rb")
+      assert_operator service, :source_file?, Pathname("lib/inline.rb")
+    end
+
+    service.typecheck_source(path: Pathname("lib/inline.rb"), target: project.targets.find { _1.name == :inline }).tap do |diagnostics|
+      assert_instance_of Array, diagnostics
+      assert_empty diagnostics
+    end
+
+    service.validate_signature(path: Pathname("lib/inline.rb"), target: project.targets.find { _1.name == :inline }).tap do |diagnostics|
+      assert_instance_of Array, diagnostics
+      assert_empty diagnostics
+    end
+  end
+
+  def test_update__inline__type_error #: void
+    service = Services::TypeCheckService.new(project: project)
+
+    {
+      Pathname("lib/inline.rb") => [ContentChange.string(<<RBS)],
+class Inline
+  def foo #: String
+    123
+  end
+end
+RBS
+    }.tap do |changes|
+      service.update(changes: changes)
+
+      assert_operator service.source_files, :key?, Pathname("lib/inline.rb")
+
+      assert_operator service, :signature_file?, Pathname("lib/inline.rb")
+      assert_operator service, :source_file?, Pathname("lib/inline.rb")
+    end
+
+    service.typecheck_source(path: Pathname("lib/inline.rb"), target: project.targets.find { _1.name == :inline }).tap do |diagnostics|
+      assert_instance_of Array, diagnostics
+      assert_any!(diagnostics) do |error|
+        assert_instance_of Diagnostic::Ruby::MethodBodyTypeMismatch, error
+      end
+    end
+
+    service.validate_signature(path: Pathname("lib/inline.rb"), target: project.targets.find { _1.name == :inline }).tap do |diagnostics|
+      assert_instance_of Array, diagnostics
+      assert_empty diagnostics
+    end
+  end
+
+  def test_update__inline__validation_error #: void
+    service = Services::TypeCheckService.new(project: project)
+
+    {
+      Pathname("lib/inline.rb") => [ContentChange.string(<<RBS)],
+class Inline
+  def foo #: String)
+    ""
+  end
+end
+RBS
+    }.tap do |changes|
+      service.update(changes: changes)
+
+      assert_operator service.source_files, :key?, Pathname("lib/inline.rb")
+
+      assert_operator service, :signature_file?, Pathname("lib/inline.rb")
+      assert_operator service, :source_file?, Pathname("lib/inline.rb")
+    end
+
+    service.typecheck_source(path: Pathname("lib/inline.rb"), target: project.targets.find { _1.name == :inline }).tap do |diagnostics|
+      assert_instance_of Array, diagnostics
+      assert_empty diagnostics
+    end
+
+    service.validate_signature(path: Pathname("lib/inline.rb"), target: project.targets.find { _1.name == :inline }).tap do |diagnostics|
+      assert_instance_of Array, diagnostics
+      assert_any!(diagnostics) do |error|
+        assert_instance_of Diagnostic::Signature::InlineDiagnostic, error
+        assert_instance_of RBS::InlineParser::Diagnostic::AnnotationSyntaxError, error.diagnostic
+        assert_equal ": String)", error.location.source
+      end
+    end
+  end
+
+  def test_update__inline__mixin_unknown_type_name
+    service = Services::TypeCheckService.new(project: project)
+
+    {
+      Pathname("sig/core.rbs") => [ContentChange.string(<<RBS)],
+module M[T]
+  def foo: () -> T
+end
+RBS
+      Pathname("lib/inline.rb") => [ContentChange.string(<<RUBY)],
+class Example
+  include M #[Str]
+end
+RUBY
+    }.tap do |changes|
+      service.update(changes: changes)
+
+      assert_operator service.source_files, :key?, Pathname("lib/inline.rb")
+      assert_operator service, :signature_file?, Pathname("lib/inline.rb")
+      assert_operator service, :source_file?, Pathname("lib/inline.rb")
+    end
+
+    service.typecheck_source(path: Pathname("lib/inline.rb"), target: project.targets.find { _1.name == :inline }).tap do |diagnostics|
+      assert_instance_of Array, diagnostics
+    end
+
+    service.validate_signature(path: Pathname("lib/inline.rb"), target: project.targets.find { _1.name == :inline }).tap do |diagnostics|
+      assert_instance_of Array, diagnostics
+      assert_any!(diagnostics) do |error|
+        assert_instance_of Diagnostic::Signature::UnknownTypeName, error
+        assert_equal ::RBS::TypeName.parse("Str"), error.name
+        assert_equal "Cannot find type `Str`", error.header_line
+      end
+    end
+  end
+
+  def test_update__inline__mixin_passing_unexpected_type_arguments
+    service = Services::TypeCheckService.new(project: project)
+
+    {
+      Pathname("lib/inline.rb") => [ContentChange.string(<<RBS)],
+module M
+end
+
+class A
+  include M #[String, Integer]
+end
+
+class B
+  extend M #[String]
+end
+RBS
+    }.tap do |changes|
+      service.update(changes: changes)
+
+      assert_operator service.source_files, :key?, Pathname("lib/inline.rb")
+      assert_operator service, :signature_file?, Pathname("lib/inline.rb")
+      assert_operator service, :source_file?, Pathname("lib/inline.rb")
+    end
+
+    service.typecheck_source(path: Pathname("lib/inline.rb"), target: project.targets.find { _1.name == :inline }).tap do |diagnostics|
+      assert_instance_of Array, diagnostics
+      assert_any!(diagnostics) do |error|
+        assert_instance_of Diagnostic::Ruby::UnexpectedError, error
+        assert_instance_of RBS::InvalidTypeApplicationError, error.error
+      end
+    end
+
+    service.validate_signature(path: Pathname("lib/inline.rb"), target: project.targets.find { _1.name == :inline }).tap do |diagnostics|
+      assert_instance_of Array, diagnostics
+
+      # Check for too many type arguments error
+      assert_any!(diagnostics) do |error|
+        assert_instance_of Diagnostic::Signature::InvalidTypeApplication, error
+        assert_equal ::RBS::TypeName.new(name: :M, namespace: RBS::Namespace.root), error.name
+        assert_equal 2, error.args.size
+        assert_equal [], error.params
+        assert_equal "include M", error.location.source
+        assert_equal "Type `::M` is not generic but used as a generic type with 2 arguments", error.header_line
+      end
+
+      # Check for too few type arguments error
+      assert_any!(diagnostics) do |error|
+        assert_instance_of Diagnostic::Signature::InvalidTypeApplication, error
+        assert_equal ::RBS::TypeName.new(name: :M, namespace: RBS::Namespace.root), error.name
+        assert_equal 1, error.args.size
+        assert_equal [], error.params
+        assert_equal "extend M", error.location.source
+        assert_equal "Type `::M` is not generic but used as a generic type with 1 arguments", error.header_line
+      end
+    end
+  end
+
+  def test_update__inline__inheritance_non_constant_super_class
+    service = Services::TypeCheckService.new(project: project)
+
+    {
+      Pathname("lib/inline.rb") => [ContentChange.string(<<RUBY)],
+class MyClass
+end
+
+klass = MyClass
+
+# Super class is not a constant - this should be detected as a limitation
+class Foo < klass
+  #: () -> String
+  def test
+    "foo"
+  end
+end
+RUBY
+    }.tap do |changes|
+      service.update(changes: changes)
+
+      assert_operator service.source_files, :key?, Pathname("lib/inline.rb")
+      assert_operator service, :signature_file?, Pathname("lib/inline.rb")
+      assert_operator service, :source_file?, Pathname("lib/inline.rb")
+    end
+
+    service.typecheck_source(path: Pathname("lib/inline.rb"), target: project.targets.find { _1.name == :inline }).tap do |diagnostics|
+      assert_instance_of Array, diagnostics
+      assert_empty diagnostics
+    end
+
+    service.validate_signature(path: Pathname("lib/inline.rb"), target: project.targets.find { _1.name == :inline }).tap do |diagnostics|
+      assert_instance_of Array, diagnostics
+
+      assert_any!(diagnostics) do |error|
+        assert_instance_of Diagnostic::Signature::InlineDiagnostic, error
+        assert_instance_of RBS::InlineParser::Diagnostic::NonConstantSuperClassName, error.diagnostic
+        assert_equal "klass", error.location.source
+      end
+    end
+  end
+
+  def test_update__inline__inheritance_generic_missing_type_args
+    service = Services::TypeCheckService.new(project: project)
+
+    {
+      Pathname("sig/core.rbs") => [ContentChange.string(<<RBS)],
+class SuperClass[T]
+  def foo: () -> T
+end
+RBS
+      Pathname("lib/inline.rb") => [ContentChange.string(<<RUBY)],
+class ChildClass < SuperClass
+end
+
+class ChildClass2 < SuperClass #[String, void]
+end
+RUBY
+    }.tap do |changes|
+      service.update(changes: changes)
+
+      assert_operator service.source_files, :key?, Pathname("lib/inline.rb")
+      assert_operator service, :signature_file?, Pathname("lib/inline.rb")
+      assert_operator service, :source_file?, Pathname("lib/inline.rb")
+    end
+
+    service.typecheck_source(path: Pathname("lib/inline.rb"), target: project.targets.find { _1.name == :inline }).tap do |diagnostics|
+      assert_nil diagnostics
+    end
+
+    service.validate_signature(path: Pathname("lib/inline.rb"), target: project.targets.find { _1.name == :inline }).tap do |diagnostics|
+      assert_instance_of Array, diagnostics
+
+      assert_any!(diagnostics) do |error|
+        assert_instance_of Diagnostic::Signature::InvalidTypeApplication, error
+        assert_equal "SuperClass", error.location.source
+      end
+
+      assert_any!(diagnostics) do |error|
+        assert_instance_of Diagnostic::Signature::InvalidTypeApplication, error
+        assert_equal "SuperClass #[String, void]", error.location.source
+      end
+    end
+  end
+
+  def test_update__inline__instance_variable_duplication
+    service = Services::TypeCheckService.new(project: project)
+
+    {
+      Pathname("lib/inline.rb") => [ContentChange.string(<<RUBY)],
+class Person
+  # @rbs @name: String
+  # @rbs @age: Integer
+  # @rbs @name: String? -- This is a duplicate
+
+  def initialize(name, age)
+    @name = name
+    @age = age
+  end
+end
+RUBY
+    }.tap do |changes|
+      service.update(changes: changes)
+
+      assert_operator service.source_files, :key?, Pathname("lib/inline.rb")
+      assert_operator service, :signature_file?, Pathname("lib/inline.rb")
+      assert_operator service, :source_file?, Pathname("lib/inline.rb")
+    end
+
+    service.typecheck_source(path: Pathname("lib/inline.rb"), target: project.targets.find { _1.name == :inline }).tap do |diagnostics|
+      assert_instance_of Array, diagnostics
+      # Type checking may pass or fail depending on when the duplication is detected
+    end
+
+    service.validate_signature(path: Pathname("lib/inline.rb"), target: project.targets.find { _1.name == :inline }).tap do |diagnostics|
+      assert_instance_of Array, diagnostics
+      # The duplication error is reported during signature validation
+      assert_any!(diagnostics) do |error|
+        assert_instance_of Diagnostic::Signature::InstanceVariableDuplicationError, error
+        assert_equal :@name, error.variable_name
+        assert_equal RBS::TypeName.new(name: :Person, namespace: RBS::Namespace.root), error.type_name
+        assert_equal "Duplicated instance variable name `@name` in `::Person`", error.header_line
+        assert_equal "@rbs @name: String? -- This is a duplicate", error.location.source
+      end
+    end
+  end
+
+  def test_typecheck_source__ancestor_error_with_library_location
+    # Regression test for #2176: When conflicting RBS signatures cause
+    # AncestorErrorStatus and the error location points to a library file,
+    # typecheck_source should report the errors on source files so the user
+    # knows type checking is broken.
+    service = Services::TypeCheckService.new(project: project)
+    service.update(changes: reset_changes)
+
+    {
+      # Integer is declared as `class Integer < Numeric` in the core library.
+      # Redefining it with a different superclass causes SuperclassMismatchError
+      # whose location points to the library file, not the user's file.
+      Pathname("sig/core.rbs") => [ContentChange.string(<<RBS)],
+class Integer < String
+end
+RBS
+      Pathname("lib/core.rb") => [ContentChange.string(<<RUBY)],
+1 + 2
+RUBY
+    }.tap do |changes|
+      service.update(changes: changes)
+
+      sig_service = service.signature_services[:core]
+      assert_instance_of Services::SignatureService::AncestorErrorStatus, sig_service.status
+
+      # typecheck_source should return LibraryRBSError diagnostics for each signature error
+      diagnostics = service.typecheck_source(path: Pathname("lib/core.rb"), target: project.targets.find { _1.name == :core })
+      refute_nil diagnostics, "Library-originated diagnostics should be reported on source files"
+      assert_any!(diagnostics) do |error|
+        assert_instance_of Diagnostic::Ruby::LibraryRBSError, error
+        assert_equal Pathname("lib/core.rb"), Pathname(error.location.buffer.name)
+        assert_instance_of Diagnostic::Signature::SuperclassMismatch, error.error
+      end
+    end
+  end
+
+  def test_typecheck_source__ancestor_error_with_user_file_location
+    # When the error location is in a user's RBS file (not a library file),
+    # typecheck_source should NOT report it on source files — validate_signature
+    # will handle it.
+    service = Services::TypeCheckService.new(project: project)
+    service.update(changes: reset_changes)
+
+    {
+      Pathname("sig/core.rbs") => [ContentChange.string(<<RBS)],
+class Hello
+end
+
+module Hello
+end
+RBS
+      Pathname("lib/core.rb") => [ContentChange.string(<<RUBY)],
+1 + 2
+RUBY
+    }.tap do |changes|
+      service.update(changes: changes)
+
+      sig_service = service.signature_services[:core]
+      assert_instance_of Services::SignatureService::AncestorErrorStatus, sig_service.status
+
+      # Error is in a user file, so typecheck_source should not report it
+      diagnostics = service.typecheck_source(path: Pathname("lib/core.rb"), target: project.targets.find { _1.name == :core })
+      assert_nil diagnostics
+    end
+  end
+
 end

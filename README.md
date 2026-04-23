@@ -208,7 +208,7 @@ Generally, these are by our design.
 
 ## Docs
 
-There are some documents in the `manul` and `guide` directories.
+There are some documents in the `manual` and `guides` directories.
 
 - [Guides](guides)
 - [Manual](manual)

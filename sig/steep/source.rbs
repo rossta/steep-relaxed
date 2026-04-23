@@ -25,11 +25,11 @@ module Steep
       ignores: Array[AST::Ignore::t]
     ) -> void
 
-    class Builder < ::Parser::Builders::Default
+    class Builder < Prism::Translation::Parser::Builder
       def string_value: (untyped token) -> untyped
     end
 
-    def self.new_parser: () -> Parser::Ruby33
+    def self.new_parser: () -> Prism::Translation::Parser33
 
     def self.parse: (String source_code, path: Pathname, factory: AST::Types::Factory) -> Source
 
@@ -46,6 +46,13 @@ module Steep
 
     def each_annotation: () { ([Parser::AST::Node, Array[AST::Annotation::t]]) -> void } -> void
                        | () -> Enumerator[[Parser::AST::Node, Array[AST::Annotation::t]], void]
+
+    def each_block_annotation: (Parser::AST::Node) { (AST::Annotation::t) -> void } -> void
+                             | (Parser::AST::Node) -> Enumerator[AST::Annotation::t, void]
+
+    # Returns the most inner block node that may have annotations
+    #
+    def find_block_node: (Array[Parser::AST::Node]) -> Parser::AST::Node?
 
     # Yields all heredoc node and its parents under `node` (or `self.node`)
     #

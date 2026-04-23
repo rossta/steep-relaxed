@@ -44,4 +44,26 @@ class TypeCheckServiceTest < Minitest::Test
   def test_typecheck__ignore: () -> untyped
 
   def test_typecheck__ignore_error: () -> untyped
+
+  def test_typecheck__ignore_redundant: () -> untyped
+
+  def test_update__inline: () -> untyped
+
+  def test_update__inline__type_error: () -> void
+
+  def test_update__inline__validation_error: () -> void
+
+  def test_update__inline__mixin_unknown_type_name: () -> untyped
+
+  def test_update__inline__mixin_passing_unexpected_type_arguments: () -> untyped
+
+  def test_update__inline__inheritance_non_constant_super_class: () -> untyped
+
+  def test_update__inline__inheritance_generic_missing_type_args: () -> untyped
+
+  def test_update__inline__instance_variable_duplication: () -> untyped
+
+  def test_typecheck_source__ancestor_error_with_library_location: () -> untyped
+
+  def test_typecheck_source__ancestor_error_with_user_file_location: () -> untyped
 end

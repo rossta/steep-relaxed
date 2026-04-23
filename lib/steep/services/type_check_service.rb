@@ -53,17 +53,40 @@ module Steep
             errors
           when typing && ignores
             errors = [] #: Array[Diagnostic::Ruby::Base]
+            error_lines = [] #: Array[Integer]
 
-            errors.concat(
-              typing.errors.delete_if do |diagnostic|
-                case diagnostic.location
-                when ::Parser::Source::Range
-                  ignores.ignore?(diagnostic.location.first_line, diagnostic.location.last_line, diagnostic.diagnostic_code)
-                when RBS::Location
-                  ignores.ignore?(diagnostic.location.start_line, diagnostic.location.end_line, diagnostic.diagnostic_code)
+            used_comments = Set[].compare_by_identity #: Set[Source::IgnoreRanges::ignore]
+
+            typing.errors.each do |diagnostic|
+              case diagnostic.location
+              when ::Parser::Source::Range
+                error_lines |= (diagnostic.location.first_line..diagnostic.location.last_line).to_a
+                if ignore = ignores.ignore?(diagnostic.location.first_line, diagnostic.location.last_line, diagnostic.diagnostic_code)
+                  used_comments << ignore
+                  next
+                end
+              when RBS::Location
+                if ignore = ignores.ignore?(diagnostic.location.start_line, diagnostic.location.end_line, diagnostic.diagnostic_code)
+                  used_comments << ignore
+                  next
                 end
               end
-            )
+
+              errors << diagnostic
+            end
+
+            ignores.each_ignore do |ignore|
+              next if used_comments.include?(ignore)
+
+              case ignore
+              when Array
+                location = RBS::Location.new(ignore[0].location.buffer, ignore[0].location.start_pos, ignore[1].location.end_pos)
+              else
+                location = ignore.location
+              end
+
+              errors << Diagnostic::Ruby::RedundantIgnoreComment.new(location: location)
+            end
 
             ignores.error_ignores.each do |ignore|
               errors << Diagnostic::Ruby::InvalidIgnoreComment.new(comment: ignore.comment)
@@ -119,10 +142,6 @@ module Steep
         signature_diagnostics
       end
 
-      def has_diagnostics?
-        each_diagnostics.count > 0
-      end
-
       def diagnostics
         each_diagnostics.to_h
       end
@@ -156,7 +175,9 @@ module Steep
           Steep.measure "validation" do
             service = signature_services.fetch(target.name)
 
-            raise "#{path} is not library nor signature of #{target.name}" unless target.possible_signature_file?(path) || service.env_rbs_paths.include?(path)
+            unless target.possible_signature_file?(path) || target.possible_inline_source_file?(path) || service.env_rbs_paths.include?(path)
+              raise "#{path} is not library nor signature of #{target.name}"
+            end
 
             case service.status
             when SignatureService::SyntaxErrorStatus
@@ -221,6 +242,14 @@ module Steep
               end
             end
 
+            source = service.status.files[path]
+            if source.is_a?(RBS::Source::Ruby)
+              source.diagnostics.each do |d|
+                diagnostic = Diagnostic::Signature::InlineDiagnostic.new(d)
+                diagnostics.push(diagnostic)
+              end
+            end
+
             signature_validation_diagnostics.fetch(target.name)[path] = diagnostics
           end
         end
@@ -240,6 +269,29 @@ module Steep
               source_files[path] = file
 
               file.diagnostics
+            else
+              # Signature loading failed. If the errors originate from library RBS files,
+              # they won't be reported by validate_signature (which filters by user file path).
+              # Report them on source files so the user knows type checking is broken. (#2176)
+              case signature_service.status
+              when SignatureService::SyntaxErrorStatus, SignatureService::AncestorErrorStatus
+                library_errors = signature_service.status.diagnostics.select do |diag|
+                  diag_path = diag.location && Pathname(diag.location.buffer.name)
+                  diag_path &&
+                    signature_service.env_rbs_paths.include?(diag_path) &&
+                    !signature_service.status.files.key?(diag_path)
+                end
+
+                unless library_errors.empty?
+                  text = source_files.fetch(path).content
+                  buffer = RBS::Buffer.new(name: path, content: text)
+                  location = RBS::Location.new(buffer: buffer, start_pos: 0, end_pos: text.size)
+
+                  library_errors.map do |error|
+                    Diagnostic::Ruby::LibraryRBSError.new(error: error, location: location)
+                  end
+                end
+              end
             end
           end
         end
@@ -249,8 +301,9 @@ module Steep
         Steep.logger.tagged "#update_signature" do
           signature_targets = {} #: Hash[Pathname, Project::Target]
           changes.each do |path, changes|
-            target = project.targets.find { _1.possible_signature_file?(path) } or next
-            signature_targets[path] = target
+            if target = project.target_for_signature_path(path) || project.target_for_inline_source_path(path)
+              signature_targets[path] = target
+            end
           end
 
           project.targets.each do |target|
@@ -368,7 +421,10 @@ module Steep
       end
 
       def source_file?(path)
-        source_files.key?(path) || (project.target_for_source_path(path) ? true : false)
+        return true if source_files.key?(path)
+        return true if project.target_for_source_path(path)
+        return true if project.target_for_inline_source_path(path)
+        false
       end
 
       def signature_file?(path)
@@ -377,17 +433,6 @@ module Steep
         unless targets.empty?
           targets.keys
         end
-      end
-
-      def app_signature_file?(path)
-        target_names = signature_services.select {|_, sig| sig.files.key?(path) }.keys
-        unless target_names.empty?
-          target_names
-        end
-      end
-
-      def lib_signature_file?(path)
-        signature_services.each_value.any? {|sig| sig.env_rbs_paths.include?(path) }
       end
     end
   end

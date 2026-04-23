@@ -73,7 +73,21 @@ module Steep
                     kind: LSP::Constant::SymbolKind::CLASS,
                     container_name: container_name
                   )
+                when RBS::AST::Ruby::Declarations::ClassDecl
+                  symbols << SymbolInformation.new(
+                    name: name,
+                    location: location,
+                    kind: LSP::Constant::SymbolKind::CLASS,
+                    container_name: container_name
+                  )
                 when RBS::AST::Declarations::Module
+                  symbols << SymbolInformation.new(
+                    name: name,
+                    location: location,
+                    kind: LSP::Constant::SymbolKind::MODULE,
+                    container_name: container_name
+                  )
+                when RBS::AST::Ruby::Declarations::ModuleDecl
                   symbols << SymbolInformation.new(
                     name: name,
                     location: location,
@@ -144,18 +158,25 @@ module Steep
                       container_name: container_name
                     )
                   end
+                when RBS::AST::Ruby::Members::DefMember
+                  symbols << SymbolInformation.new(
+                    name: name,
+                    location: location,
+                    kind: LSP::Constant::SymbolKind::METHOD,
+                    container_name: container_name
+                  )
                 end
               end
             when RBSIndex::ConstantEntry
               next unless SignatureSymbolProvider.test_const_name(query, entry.const_name)
 
               entry.declarations.each do |decl|
-                next unless decl.location
-                next unless assigned?(target, Pathname(decl.location.buffer.name))
+                loc = decl.location or next
+                next unless assigned?(target, Pathname(loc.buffer.name))
 
                 symbols << SymbolInformation.new(
                   name: entry.const_name.name.to_s,
-                  location: decl.location,
+                  location: loc,
                   kind: LSP::Constant::SymbolKind::CONSTANT,
                   container_name: entry.const_name.namespace.relative!.to_s.delete_suffix("::")
                 )

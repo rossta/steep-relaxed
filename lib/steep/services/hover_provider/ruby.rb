@@ -1,57 +1,8 @@
 module Steep
   module Services
     module HoverProvider
+
       class Ruby
-        TypeContent = _ = Struct.new(:node, :type, :location, keyword_init: true)
-        VariableContent = _ = Struct.new(:node, :name, :type, :location, keyword_init: true)
-        TypeAssertionContent = _ = Struct.new(:node, :original_type, :asserted_type, :location, keyword_init: true)
-        MethodCallContent = _ = Struct.new(:node, :method_call, :location, keyword_init: true)
-        DefinitionContent = _ = Struct.new(:node, :method_name, :method_type, :definition, :location, keyword_init: true)
-        ConstantContent = _ = Struct.new(:location, :full_name, :type, :decl, keyword_init: true) do
-          # @implements ConstantContent
-
-          def comments
-            case
-            when decl = class_decl
-              decl.decls.map {|d| d.decl.comment }
-            when decl = class_alias
-              [decl.decl.comment]
-            when decl = constant_decl
-              [decl.decl.comment]
-            else
-              raise
-            end.compact
-          end
-
-          def class_decl
-            case decl
-            when ::RBS::Environment::ClassEntry, ::RBS::Environment::ModuleEntry
-              decl
-            end
-          end
-
-          def class_alias
-            case decl
-            when ::RBS::Environment::ClassAliasEntry, ::RBS::Environment::ModuleAliasEntry
-              decl
-            end
-          end
-
-          def constant_decl
-            if decl.is_a?(::RBS::Environment::ConstantEntry)
-              decl
-            end
-          end
-
-          def constant?
-            constant_decl ? true : false
-          end
-
-          def class_or_module?
-            (class_decl || class_alias) ?  true : false
-          end
-        end
-
         attr_reader :service
 
         def initialize(service:)
@@ -85,7 +36,10 @@ module Steep
           source = source.without_unrelated_defs(line: line, column: column)
           resolver = ::RBS::Resolver::ConstantResolver.new(builder: subtyping.factory.definition_builder)
           pos = source.buffer.loc_to_pos([line, column])
-          Services::TypeCheckService.type_check(source: source, subtyping: subtyping, constant_resolver: resolver, cursor: pos)
+          [
+            Services::TypeCheckService.type_check(source: source, subtyping: subtyping, constant_resolver: resolver, cursor: pos),
+            subtyping
+          ]
         rescue
           nil
         end
@@ -112,10 +66,15 @@ module Steep
 
         def content_for(target:, path:, line:, column:)
           file = service.source_files[path] or return
-          typing = typecheck(target, path: path, content: file.content, line: line, column: column) or return
-          node, *parents = typing.source.find_nodes(line: line, column: column)
+          (typing, subtyping = typecheck(target, path: path, content: file.content, line: line, column: column)) or return
+          locator = Locator::Ruby.new(typing.source)
+          result = locator.find(line, column)
 
-          if node && parents
+          case result
+          when Locator::NodeResult
+            node = result.node
+            parents = result.parents
+
             case node.type
             when :lvar
               var_name = node.children[0]
@@ -130,7 +89,7 @@ module Steep
               )
 
             when :lvasgn
-              var_name, rhs = node.children
+              var_name, _rhs = node.children
               context = typing.cursor_context.context or raise
               type = context.type_env[var_name] || typing.type_of(node: node)
 
@@ -197,15 +156,6 @@ module Steep
                   decl: entry
                 )
               end
-            when :assertion
-              original_node, _ = node.children
-
-              original_type = typing.type_of(node: original_node)
-              asserted_type = typing.type_of(node: node)
-
-              if original_type != asserted_type
-                return TypeAssertionContent.new(node: node, original_type: original_type, asserted_type: asserted_type, location: node.location.expression)
-              end
             end
 
             TypeContent.new(
@@ -213,7 +163,116 @@ module Steep
               type: typing.type_of(node: node),
               location: node.location.expression
             )
+
+          when Locator::TypeAssertionResult
+            context = typing.cursor_context.context or raise
+            pos = typing.source.buffer.loc_to_pos([line, column])
+
+            nesting = context.module_context.nesting
+            type_vars = context.variable_context.type_params.map { _1.name }
+
+            if (name, location = result.locate_type_name(pos, nesting, subtyping, type_vars))
+              if content = type_name_content(subtyping.factory.env, name, location)
+                return content
+              end
+            end
+
+            assertion_node = result.node.node
+            original_node = assertion_node.children[0] or raise
+
+            original_type = typing.type_of(node: original_node)
+            asserted_type = typing.type_of(node: assertion_node)
+
+            if original_type != asserted_type
+              TypeAssertionContent.new(
+                node: assertion_node,
+                original_type: original_type,
+                asserted_type: asserted_type,
+                location: assertion_node.location.expression
+              )
+            else
+              TypeContent.new(
+                node: assertion_node,
+                type: typing.type_of(node: assertion_node),
+                location: assertion_node.location.expression
+              )
+            end
+
+          when Locator::TypeApplicationResult
+            begin
+              context = typing.cursor_context.context or raise
+              pos = typing.source.buffer.loc_to_pos([line, column])
+
+              nesting = context.module_context.nesting
+              type_vars = context.variable_context.type_params.map { _1.name }
+
+              if (name, location = result.locate_type_name(pos, nesting, subtyping, type_vars))
+                if content = type_name_content(subtyping.factory.env, name, location)
+                  return content
+                end
+              end
+
+              nil
+            rescue ::RBS::ParsingError
+              return nil
+            end
           end
+        end
+
+        def type_name_content(environment, type_name, location)
+          case
+          when type_name.class?
+            if entry = environment.module_class_entry(type_name)
+              decl = case entry
+              when ::RBS::Environment::ModuleEntry, ::RBS::Environment::ClassEntry
+                entry.primary_decl
+              else
+                entry.decl
+              end
+
+              ClassTypeContent.new(
+                location: location,
+                decl: decl
+              )
+            end
+          when type_name.interface?
+            if entry = environment.interface_decls.fetch(type_name, nil)
+              InterfaceTypeContent.new(
+                location: location,
+                decl: entry.decl
+              )
+            end
+          when type_name.alias?
+            if entry = environment.type_alias_decls.fetch(type_name, nil)
+              TypeAliasContent.new(
+                location: location,
+                decl: entry.decl
+              )
+            end
+          end
+        end
+
+        def content_for_inline(target:, path:, line:, column:)
+          signature = service.signature_services.fetch(target.name)
+          source = signature.latest_env.sources.find do
+            if _1.is_a?(::RBS::Source::Ruby)
+              _1.buffer.name == path
+            end
+          end
+
+          return unless source.is_a?(::RBS::Source::Ruby)
+
+          locator = Locator::Inline.new(source)
+          result = locator.find(line, column)
+
+          case result
+          when Locator::InlineTypeNameResult
+            return type_name_content(signature.latest_env, result.type_name, result.location)
+          else
+            Steep.logger.fatal { { result: result.class }.inspect }
+          end
+
+          nil
         end
       end
     end

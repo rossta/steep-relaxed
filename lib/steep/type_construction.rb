@@ -39,6 +39,10 @@ module Steep
 
     SPECIAL_LVAR_NAMES = Set[:_, :__any__, :__skip__]
 
+    # a synthetic variable name for anonymous block params (can't conflict with
+    # user variables since Ruby doesn't allow * in local variable names).
+    ANONYMOUS_BLOCK_PASSABLE_LVAR = :"*block"
+
     include ModuleHelper
 
     attr_reader :checker
@@ -212,13 +216,21 @@ module Steep
           TypeInference::MethodParams.empty(node: node)
         end
 
+      block_param_name = nil #: Symbol?
+      method_params.each_param do |param|
+        if param.is_a?(TypeInference::MethodParams::BlockParameter)
+          block_param_name = param.name || ANONYMOUS_BLOCK_PASSABLE_LVAR
+        end
+      end
+
       method_context = TypeInference::Context::MethodContext.new(
         name: method_name,
         method: definition && definition.methods[method_name],
         method_type: method_type,
         return_type: annots.return_type || method_type&.type&.return_type || AST::Builtin.any_type,
         super_method: super_method,
-        forward_arg_type: method_params.forward_arg_type
+        forward_arg_type: method_params.forward_arg_type,
+        block_param_name: block_param_name
       )
 
       local_variable_types = method_params.each_param.with_object({}) do |param, hash| #$ Hash[Symbol, AST::Types::t]
@@ -226,6 +238,8 @@ module Steep
           unless SPECIAL_LVAR_NAMES.include?(param.name)
             hash[param.name] = param.var_type
           end
+        elsif param.is_a?(TypeInference::MethodParams::BlockParameter)
+          hash[ANONYMOUS_BLOCK_PASSABLE_LVAR] = param.var_type
         end
       end
       type_env = context.type_env.assign_local_variables(local_variable_types)
@@ -368,7 +382,7 @@ module Steep
       end
 
       if implement_module_name
-        module_entry = checker.factory.definition_builder.env.normalized_module_entry(implement_module_name.name)
+        module_entry = checker.factory.definition_builder.env.module_entry(implement_module_name.name, normalized: true)
         if module_entry
           module_context = module_context.update(
             instance_type: AST::Types::Intersection.build(
@@ -397,7 +411,7 @@ module Steep
               ].compact
             )
           )
-        elsif checker.factory.definition_builder.env.normalized_class_entry(implement_module_name.name)
+        elsif checker.factory.definition_builder.env.class_entry(implement_module_name.name, normalized:true)
           typing.add_error(
             Diagnostic::Ruby::ClassModuleMismatch.new(node: node, name: new_module_name)
           )
@@ -489,8 +503,8 @@ module Steep
           module_context = module_context.update(instance_definition: nil, module_definition: nil)
         end
 
-        if !checker.factory.definition_builder.env.normalized_class_entry(implement_module_name.name) &&
-          checker.factory.definition_builder.env.normalized_module_entry(implement_module_name.name)
+        if !checker.factory.definition_builder.env.class_entry(implement_module_name.name, normalized: true) &&
+          checker.factory.definition_builder.env.module_entry(implement_module_name.name, normalized: true)
           typing.add_error(
             Diagnostic::Ruby::ClassModuleMismatch.new(node: node, name: new_class_name)
           )
@@ -1355,7 +1369,7 @@ module Steep
           yield_self do
             var = node.children[0]
 
-            if SPECIAL_LVAR_NAMES.include?(var)
+            if !var || SPECIAL_LVAR_NAMES.include?(var)
               return add_typing(node, type: AST::Builtin.any_type)
             end
 
@@ -1376,7 +1390,7 @@ module Steep
           yield_self do
             var = node.children[0]
 
-            if SPECIAL_LVAR_NAMES.include?(var)
+            if !var || SPECIAL_LVAR_NAMES.include?(var)
               return add_typing(node, type: AST::Builtin.any_type)
             end
 
@@ -1442,7 +1456,7 @@ module Steep
 
           case
           when hint && check_relation(sub_type: ty, super_type: hint).success? && !hint.is_a?(AST::Types::Any) && !hint.is_a?(AST::Types::Top)
-            add_typing(node, type: hint)
+            add_typing(node, type: unwrap(hint))
           when condition
             add_typing(node, type: ty)
           else
@@ -1670,7 +1684,7 @@ module Steep
           end
 
         when :yield
-          if method_context && method_context.method_type
+          if method_context && (method_type = method_context.method_type)
             if block_type = method_context.block_type
               if block_type.type.params
                 type = AST::Types::Proc.new(
@@ -1701,9 +1715,12 @@ module Steep
               end
 
               add_typing(node, type: block_type.type.return_type)
-            else
+            elsif method_type.type.params
               typing.add_error(Diagnostic::Ruby::UnexpectedYield.new(node: node))
               fallback_to_any node
+            else
+              constr = type_check_untyped_args(node.children)
+              add_typing(node, type: AST::Builtin.any_type)
             end
           else
             fallback_to_any node
@@ -1733,7 +1750,7 @@ module Steep
               if hint
                 array = AST::Builtin::Array.instance_type(AST::Builtin.any_type)
                 if check_relation(sub_type: array, super_type: hint).success?
-                  add_typing node, type: hint
+                  add_typing node, type: unwrap(hint)
                 else
                   add_typing node, type: array
                 end
@@ -1745,13 +1762,18 @@ module Steep
               if hint
                 tuples = select_flatten_types(hint) {|type| type.is_a?(AST::Types::Tuple) } #: Array[AST::Types::Tuple]
                 unless tuples.empty?
+                  fallback_pair = nil #: Pair?
                   tuples.each do |tuple|
                     typing.new_child() do |child_typing|
                       if pair = with_new_typing(child_typing).try_tuple_type(node, tuple)
-                        return pair.with(constr: pair.constr.save_typing)
+                        if pair.constr.check_relation(sub_type: pair.type, super_type: tuple).success?
+                          return pair.with(constr: pair.constr.save_typing)
+                        end
+                        fallback_pair ||= pair.with(constr: pair.constr.save_typing)
                       end
                     end
                   end
+                  return fallback_pair if fallback_pair
                 end
               end
 
@@ -2192,7 +2214,10 @@ module Steep
           yield_self do
             body, ensure_body = node.children
             body_type = synthesize(body).type if body
-            synthesize(ensure_body) if ensure_body
+            if ensure_body
+              ensure_constr = for_branch(node)
+              ensure_constr.synthesize(ensure_body)
+            end
             if body_type
               add_typing(node, type: body_type)
             else
@@ -2505,7 +2530,9 @@ module Steep
               end
             else
               # Anonymous block_pass only happens inside method definition
-              if block_type = method_context!.block_type
+              if (type = context.type_env[ANONYMOUS_BLOCK_PASSABLE_LVAR])
+                # Use type from type_env (may have been narrowed by block_given?)
+              elsif block_type = method_context!.block_type
                 type = AST::Types::Proc.new(
                   type: block_type.type,
                   block: nil,
@@ -2687,7 +2714,6 @@ module Steep
           end
         end
       rescue RBS::BaseError => exn
-        Steep.logger.warn("hello")
         Steep.logger.warn { "Unexpected RBS error: #{exn.message}" }
         exn.backtrace&.each {|loc| Steep.logger.warn "  #{loc}" }
         typing.add_error(Diagnostic::Ruby::UnexpectedError.new(node: node, error: exn))
@@ -3225,6 +3251,8 @@ module Steep
       MethodName("::Hash#[]")
     ]
 
+    KERNEL_BLOCK_GIVEN = MethodName("::Kernel#block_given?")
+
     def pure_send?(call, receiver, arguments)
       return false unless call.node.type == :send || call.node.type == :csend
       return false unless call.pure? || KNOWN_PURE_METHODS.superset?(Set.new(call.method_decls.map(&:method_name)))
@@ -3362,6 +3390,34 @@ module Steep
             errors: errors,
             method_decls: decls
           )
+        end
+
+        # Handle block_given? type narrowing
+        if method_name == :block_given? && call.is_a?(TypeInference::MethodCall::Typed)
+          if call.method_decls.all? { _1.method_name == KERNEL_BLOCK_GIVEN }
+            if (block_var = constr.method_context&.block_param_name)
+              if (var_type = constr.context.type_env[block_var])
+                unwrapped = constr.checker.factory.unwrap_optional(var_type)
+
+                if unwrapped
+                  truthy_env = constr.context.type_env.refine_types(
+                    local_variable_types: { block_var => unwrapped }
+                  )
+                  falsy_env = constr.context.type_env.refine_types(
+                    local_variable_types: { block_var => AST::Builtin.nil_type }
+                  )
+
+                  env_type = AST::Types::Logic::Env.new(
+                    truthy: truthy_env,
+                    falsy: falsy_env,
+                    type: call.return_type
+                  )
+
+                  call = call.with_return_type(env_type)
+                end
+              end
+            end
+          end
         end
 
         constr.add_call(call)
@@ -4710,8 +4766,15 @@ module Steep
 
     def validate_method_definitions(node, module_name)
       module_name_1 = module_name.name
-      module_entry = checker.factory.env.normalized_module_class_entry(module_name_1) or raise
-      member_decl_count = module_entry.decls.count {|d| d.decl.each_member.count > 0 }
+      module_entry = checker.factory.env.module_class_entry(module_name_1, normalized: true) or raise
+      member_decl_count = module_entry.each_decl.count do |decl|
+        case decl
+        when RBS::AST::Declarations::Base
+          decl.each_member.count > 0
+        else
+          false
+        end
+      end
 
       return unless member_decl_count == 1
 
@@ -4878,7 +4941,7 @@ module Steep
         else
           literal_type = AST::Types::Literal.new(value: literal)
           if check_relation(sub_type: literal_type, super_type: hint).success?
-            hint
+            unwrap(hint)
           end
         end
       end
@@ -4887,7 +4950,7 @@ module Steep
     def to_instance_type(type, args: nil)
       args = args || case type
                      when AST::Types::Name::Singleton
-                       decl = checker.factory.env.normalized_module_class_entry(type.name) or raise
+                       decl = checker.factory.env.module_class_entry(type.name, normalized: true) or raise
                        decl.type_params.each.map { AST::Builtin.any_type }
                      else
                        raise "unexpected type to to_instance_type: #{type}"
@@ -5295,9 +5358,19 @@ module Steep
       annotations =
         case entry
         when RBS::Environment::ModuleEntry, RBS::Environment::ClassEntry
-          entry.decls.flat_map { _1.decl.annotations }
+          entry.each_decl.flat_map do |decl|
+            if decl.is_a?(RBS::AST::Declarations::Base)
+              decl.annotations
+            else
+              []
+            end
+          end
         when RBS::Environment::ConstantEntry, RBS::Environment::ClassAliasEntry, RBS::Environment::ModuleAliasEntry
-          entry.decl.annotations
+          if entry.decl.is_a?(RBS::AST::Declarations::Base)
+            entry.decl.annotations
+          else
+            [] #: Array[RBS::AST::Annotation]
+          end
         end
 
       if annotations

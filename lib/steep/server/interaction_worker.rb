@@ -154,19 +154,25 @@ module Steep
             Steep.logger.info "path: #{job.path}, line: #{job.line}, column: #{job.column}, trigger: #{job.trigger}"
 
             case
-            when target = project.target_for_source_path(job.path)
+            when target = project.target_for_inline_source_path(job.path) || project.target_for_source_path(job.path)
               file = service.source_files[job.path] or return
               subtyping = service.signature_services.fetch(target.name).current_subtyping or return
 
-              provider = Services::CompletionProvider.new(source_text: file.content, path: job.path, subtyping: subtyping)
-              items = begin
-                        provider.run(line: job.line, column: job.column)
-                      rescue Parser::SyntaxError
-                        [] #: Array[Services::CompletionProvider::item]
-                      end
+              provider = Services::CompletionProvider::Ruby.new(source_text: file.content, path: job.path, subtyping: subtyping)
 
-              completion_items = items.map do |item|
-                format_completion_item(item)
+              if (prefix_size, items = provider.run_at_comment(line: job.line, column: job.column))
+                completion_items = items.map { format_completion_item(_1) }
+                completion_items.concat builtin_types(prefix_size, job.line, job.column)
+              else
+                items = begin
+                          provider.run(line: job.line, column: job.column)
+                        rescue Parser::SyntaxError
+                          [] #: Array[Services::CompletionProvider::item]
+                        end
+
+                completion_items = items.map do |item|
+                  format_completion_item(item)
+                end
               end
 
               Steep.logger.debug "items = #{completion_items.inspect}"
@@ -179,71 +185,14 @@ module Steep
               sig_service = service.signature_services[target.name] or raise
               relative_path = job.path
 
-              context = nil #: RBS::Resolver::context
+              completion = Services::CompletionProvider::RBS.new(relative_path, sig_service)
+              prefix_size, type_names = completion.run(job.line, job.column)
 
-              case sig_service.status
-              when Services::SignatureService::SyntaxErrorStatus, Services::SignatureService::AncestorErrorStatus
-                if buffer = sig_service.latest_env.buffers.find {|buf| Pathname(buf.name) == Pathname(relative_path) }
-                  dirs = sig_service.latest_env.signatures.fetch(buffer)[0]
-                else
-                  dirs = [] #: Array[RBS::AST::Directives::t]
-                end
-              else
-                signature = sig_service.files.fetch(relative_path).signature
-                signature.is_a?(Array) or raise
-                buffer, dirs, decls = signature
-
-                locator = RBS::Locator.new(buffer: buffer, dirs: dirs, decls: decls)
-
-                _hd, tail = locator.find2(line: job.line, column: job.column)
-                tail ||= [] #: Array[RBS::Locator::component]
-
-                tail.reverse_each do |t|
-                  case t
-                  when RBS::AST::Declarations::Module, RBS::AST::Declarations::Class
-                    if (last_type_name = context&.[](1)).is_a?(RBS::TypeName)
-                      context = [context, last_type_name + t.name]
-                    else
-                      context = [context, t.name.absolute!]
-                    end
-                  end
-                end
-              end
-
-              buffer = RBS::Buffer.new(name: relative_path, content: sig_service.files.fetch(relative_path).content)
-              prefix = Services::TypeNameCompletion::Prefix.parse(buffer, line: job.line, column: job.column)
-
-              completion = Services::TypeNameCompletion.new(env: sig_service.latest_env, context: context, dirs: dirs)
-              type_names = completion.find_type_names(prefix)
-              prefix_size = prefix ? prefix.size : 0
-
-              completion_items = type_names.map do |type_name|
-                absolute_name, relative_name = completion.resolve_name_in_context(type_name)
+              completion_items = type_names.map do |absolute_name, relative_name|
                 format_completion_item_for_rbs(sig_service, absolute_name, job, relative_name.to_s, prefix_size)
               end
 
-              ["untyped", "void", "bool", "class", "module", "instance", "nil"].each do |name|
-                completion_items << LSP::Interface::CompletionItem.new(
-                  label: name,
-                  detail: "(builtin type)",
-                  text_edit: LSP::Interface::TextEdit.new(
-                    range: LSP::Interface::Range.new(
-                      start: LSP::Interface::Position.new(
-                        line: job.line - 1,
-                        character: job.column - prefix_size
-                      ),
-                      end: LSP::Interface::Position.new(
-                        line: job.line - 1,
-                        character: job.column
-                      )
-                    ),
-                    new_text: name
-                  ),
-                  kind: LSP::Constant::CompletionItemKind::KEYWORD,
-                  filter_text: name,
-                  sort_text: "zz__#{name}"
-                )
-              end
+              completion_items.concat(builtin_types(prefix_size, job.line, job.column))
 
               LSP::Interface::CompletionList.new(
                 is_incomplete: !sig_service.status.is_a?(Services::SignatureService::LoadedStatus),
@@ -280,10 +229,13 @@ module Steep
 
           case class_entry
           when RBS::Environment::ClassEntry, RBS::Environment::ModuleEntry
-            comments = class_entry.decls.map {|decl| decl.decl.comment }.compact
-            decl = class_entry.primary.decl
+            comments = class_entry.each_decl.map {|decl| decl.is_a?(RBS::AST::Declarations::Base) ? decl.comment : nil }.compact
+            decl = class_entry.primary_decl
           when RBS::Environment::ClassAliasEntry, RBS::Environment::ModuleAliasEntry
-            comments = [class_entry.decl.comment].compact
+            comments = [] #: Array[RBS::AST::Comment]
+            if comment = class_entry.decl.comment
+              comments << comment
+            end
             decl = class_entry.decl
           end
 
@@ -476,7 +428,7 @@ module Steep
 
       def process_signature_help(job)
         Steep.logger.tagged("##{__method__}") do
-          if target = project.target_for_source_path(job.path)
+          if target = project.target_for_inline_source_path(job.path) || project.target_for_source_path(job.path)
             file = service.source_files[job.path] or return
             subtyping = service.signature_services.fetch(target.name).current_subtyping or return
             source =
@@ -513,6 +465,31 @@ module Steep
       rescue Parser::SyntaxError
         # Reuse the latest result to keep SignatureHelp opened while typing
         @last_signature_help_result if @last_signature_help_line == job.line
+      end
+
+      def builtin_types(prefix_size, line, column)
+        ["untyped", "void", "bool", "class", "module", "instance", "nil", "top", "bot"].map do |name|
+          LSP::Interface::CompletionItem.new(
+            label: name,
+            detail: "(builtin type)",
+            text_edit: LSP::Interface::TextEdit.new(
+              range: LSP::Interface::Range.new(
+                start: LSP::Interface::Position.new(
+                  line: line - 1,
+                  character: column - prefix_size
+                ),
+                end: LSP::Interface::Position.new(
+                  line: line - 1,
+                  character: column
+                )
+              ),
+              new_text: name
+            ),
+            kind: LSP::Constant::CompletionItemKind::KEYWORD,
+            filter_text: name,
+            sort_text: "zz__#{name}"
+          )
+        end
       end
     end
   end

@@ -555,10 +555,6 @@ class TypeConstructionTest < Minitest::Test
 
   def test_block_param_masgn: () -> untyped
 
-  def test_block_param_masgn_with_unnamed: () -> untyped
-
-  def test_block_param_masgn_with_unnamed2: () -> untyped
-
   def test_logic_receiver_is_nil: () -> untyped
 
   def test_logic_receiver_is_arg: () -> untyped
@@ -862,6 +858,8 @@ class TypeConstructionTest < Minitest::Test
   def test_self_type_call: () -> untyped
 
   def test_empty_yield: () -> untyped
+
+  def test_yield_with_untyped_method_type: () -> untyped
 
   def test_self_type_binding_proc_with_type_declaration: () -> untyped
 

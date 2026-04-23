@@ -25,7 +25,8 @@ module TestHelper
 
   def assert_any: (untyped collection) ?{ (?) -> untyped } -> untyped
 
-  def assert_any!: (untyped collection, ?size: untyped) ?{ (?) -> untyped } -> untyped
+  # @rbs [T] (_Each[T], ?size: Integer) { (T) -> void } -> void
+  def assert_any!: [T] (_Each[T], ?size: Integer) { (T) -> void } -> void
 
   def assert_all: (untyped collection) ?{ (?) -> untyped } -> untyped
 
@@ -123,14 +124,15 @@ end
 module FactoryHelper
   @factory: Steep::AST::Types::Factory?
 
-  # @rbs (?Hash[String, String], ?nostdlib: bool) { (AST::Types::Factory) -> void } -> void
-  def with_factory: (?Hash[String, String], ?nostdlib: bool) { (AST::Types::Factory) -> void } -> void
+  # @rbs (?Hash[String, String], ?Hash[String, String], ?nostdlib: bool) { (AST::Types::Factory) -> void } -> void
+  def with_factory: (?Hash[String, String], ?Hash[String, String], ?nostdlib: bool) { (AST::Types::Factory) -> void } -> void
 
-  def factory: () -> untyped
+  def factory: () -> Steep::AST::Types::Factory
 
   def parse_type: (untyped string, ?factory: untyped, ?variables: untyped) -> untyped
 
-  def parse_ruby: (untyped string, ?factory: untyped) -> untyped
+  # @rbs (String, ?factory: AST::Types::Factory) -> Steep::Source
+  def parse_ruby: (String, ?factory: AST::Types::Factory) -> Steep::Source
 
   def parse_method_type: (untyped string, ?factory: untyped, ?variables: untyped) -> untyped
 end

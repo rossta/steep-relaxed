@@ -22,6 +22,12 @@ module Steep
             declarations << decl
           when RBS::AST::Declarations::ClassAlias, RBS::AST::Declarations::ModuleAlias
             declarations << decl
+          when RBS::AST::Ruby::Declarations::ClassDecl
+            declarations << decl
+          when RBS::AST::Ruby::Declarations::ModuleDecl
+            declarations << decl
+          when RBS::AST::Ruby::Declarations::ClassModuleAliasDecl
+            declarations << decl
           else
             raise "Unexpected type declaration: #{decl}"
           end
@@ -46,6 +52,8 @@ module Steep
           when RBS::AST::Declarations::TypeAlias
             references << ref
           when RBS::AST::Declarations::ClassAlias, RBS::AST::Declarations::ModuleAlias
+            references << ref
+          when RBS::AST::Ruby::Declarations::ClassModuleAliasDecl
             references << ref
           else
             raise "Unexpected type reference: #{ref}"
@@ -74,6 +82,8 @@ module Steep
             RBS::AST::Members::AttrReader,
             RBS::AST::Members::AttrAccessor
             declarations << decl
+          when RBS::AST::Ruby::Members::DefMember
+            declarations << decl
           else
             raise "Unexpected method declaration: #{decl}"
           end
@@ -93,7 +103,7 @@ module Steep
 
         def add_declaration(decl)
           case decl
-          when RBS::AST::Declarations::Constant
+          when RBS::AST::Declarations::Constant, RBS::AST::Ruby::Declarations::ConstantDecl
             declarations << decl
           else
             raise
@@ -228,6 +238,10 @@ module Steep
               index.add_method_declaration(method_name, member)
             end
 
+          when RBS::AST::Ruby::Members::DefMember
+            method_name = InstanceMethodName.new(type_name: type_name, method_name: member.name)
+            index.add_method_declaration(method_name, member)
+
           when RBS::AST::Members::AttrAccessor, RBS::AST::Members::AttrReader, RBS::AST::Members::AttrWriter
             type_reference member.type, from: member
 
@@ -290,28 +304,37 @@ module Steep
 
         def env(env)
           env.class_decls.each do |name, decl|
-            decl.decls.each do |d|
-              index.add_type_declaration(name, d.decl)
+            decl.each_decl do |decl|
+              index.add_type_declaration(name, decl)
 
-              case d.decl
+              case decl
               when RBS::AST::Declarations::Class
-                if super_class = d.decl.super_class
-                  index.add_type_reference(super_class.name, d.decl)
+                if super_class = decl.super_class
+                  index.add_type_reference(super_class.name, decl)
                   super_class.args.each do |type|
-                    type_reference(type, from: d.decl)
+                    type_reference(type, from: decl)
                   end
                 end
               when RBS::AST::Declarations::Module
-                d.decl.self_types.each do |self_type|
-                  index.add_type_reference(self_type.name, d.decl)
+                decl.self_types.each do |self_type|
+                  index.add_type_reference(self_type.name, decl)
                   self_type.args.each do |type|
-                    type_reference(type, from: d.decl)
+                    type_reference(type, from: decl)
                   end
                 end
               end
 
-              d.decl.members.each do |member|
-                member(name, member)
+              case decl
+              when RBS::AST::Declarations::Base
+                decl.members.each do |member|
+                  member(name, member)
+                end
+              when RBS::AST::Ruby::Declarations::Base
+                decl.members.each do |member|
+                  if member.is_a?(RBS::AST::Ruby::Members::Base)
+                    member(name, member)
+                  end
+                end
               end
             end
           end
@@ -336,7 +359,9 @@ module Steep
 
           env.constant_decls.each do |name, decl|
             index.add_constant_declaration(name, decl.decl)
-            type_reference decl.decl.type, from: decl.decl
+            if decl.decl.is_a?(RBS::AST::Declarations::Constant)
+              type_reference decl.decl.type, from: decl.decl
+            end
           end
 
           env.global_decls.each do |name, decl|

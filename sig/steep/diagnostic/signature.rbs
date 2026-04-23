@@ -55,7 +55,6 @@ module Steep
         def initialize: (name: RBS::TypeName, args: Array[AST::Types::t], params: Array[Symbol], location: location?) -> void
 
         def header_line: () -> String
-
       end
 
       class UnsatisfiableTypeApplication < Base
@@ -164,6 +163,22 @@ module Steep
         include ResultPrinter2
       end
 
+      class VariableDuplicationError < Base
+        attr_reader type_name: RBS::TypeName
+
+        attr_reader variable_name: Symbol
+
+        def initialize: (type_name: RBS::TypeName, variable_name: Symbol, location: location?) -> void
+      end
+
+      class InstanceVariableDuplicationError < VariableDuplicationError
+        def header_line: () -> String
+      end
+
+      class ClassInstanceVariableDuplicationError < VariableDuplicationError
+        def header_line: () -> String
+      end
+
       # The error is raised when a class variable is defined in both `class_name` and `other_class_name`
       #
       class ClassVariableDuplicationError < Base
@@ -189,11 +204,11 @@ module Steep
       end
 
       class MixinClassError < Base
-        attr_reader member: RBS::AST::Members::Include | RBS::AST::Members::Extend | RBS::AST::Members::Prepend
+        attr_reader member: RBS::MixinClassError::member
 
         attr_reader type_name: RBS::TypeName
 
-        def initialize: (location: location?, member: RBS::AST::Members::Include | RBS::AST::Members::Extend | RBS::AST::Members::Prepend, type_name: RBS::TypeName) -> void
+        def initialize: (location: location?, member: RBS::MixinClassError::member, type_name: RBS::TypeName) -> void
 
         def header_line: () -> String
 
@@ -205,9 +220,12 @@ module Steep
       # A class definition has a module as its super class
       #
       class InheritModuleError < Base
-        attr_reader super_class: RBS::AST::Declarations::Class::Super
+        type super_class = RBS::AST::Declarations::Class::Super
+                         | RBS::AST::Ruby::Declarations::ClassDecl::SuperClass
 
-        def initialize: (RBS::AST::Declarations::Class::Super) -> void
+        attr_reader super_class: super_class
+
+        def initialize: (super_class) -> void
 
         def header_line: () -> String
       end
@@ -239,17 +257,23 @@ module Steep
       end
 
       class InconsistentClassModuleAliasError < Base
-        attr_reader decl: RBS::AST::Declarations::ModuleAlias | RBS::AST::Declarations::ClassAlias
+        type decl = RBS::AST::Declarations::ModuleAlias | RBS::AST::Declarations::ClassAlias
+                  | RBS::AST::Ruby::Declarations::ClassModuleAliasDecl
 
-        def initialize: (decl: RBS::AST::Declarations::ModuleAlias | RBS::AST::Declarations::ClassAlias) -> void
+        attr_reader decl: decl
+
+        def initialize: (decl: decl) -> void
 
         def header_line: () -> String
       end
 
       class CyclicClassAliasDefinitionError < Base
-        attr_reader decl: RBS::AST::Declarations::ModuleAlias | RBS::AST::Declarations::ClassAlias
+        type decl = RBS::AST::Declarations::ModuleAlias | RBS::AST::Declarations::ClassAlias
+                  | RBS::AST::Ruby::Declarations::ClassModuleAliasDecl
 
-        def initialize: (decl: RBS::AST::Declarations::ModuleAlias | RBS::AST::Declarations::ClassAlias) -> void
+        attr_reader decl: decl
+
+        def initialize: (decl: decl) -> void
 
         def header_line: () -> String
       end
@@ -282,6 +306,14 @@ module Steep
         attr_reader message: String?
 
         def initialize: (RBS::TypeName type_name, String? message, location: RBS::Location[untyped, untyped]?) -> void
+
+        def header_line: () -> String
+      end
+
+      class InlineDiagnostic < Base
+        attr_reader diagnostic: RBS::InlineParser::Diagnostic::t
+
+        def initialize: (RBS::InlineParser::Diagnostic::t) -> void
 
         def header_line: () -> String
       end
