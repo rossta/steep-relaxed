@@ -1,11 +1,8 @@
 module Steep
   module Services
     module HoverProvider
-      class RBS
-        TypeAliasContent = _ = Struct.new(:location, :decl, keyword_init: true)
-        ClassContent = _ = Struct.new(:location, :decl, keyword_init: true)
-        InterfaceContent = _ = Struct.new(:location, :decl, keyword_init: true)
 
+      class RBS
         attr_reader :service
 
         def initialize(service:)
@@ -20,8 +17,10 @@ module Steep
           service = self.service.signature_services.fetch(target.name)
 
           env = service.latest_env
-          buffer = env.buffers.find {|buf| buf.name.to_s == path.to_s } or return
-          (dirs, decls = env.signatures[buffer]) or raise
+          source = env.each_rbs_source.find {|src| src.buffer.name == path } or return
+          buffer = source.buffer
+          dirs = source.directives
+          decls = source.declarations
 
           locator = ::RBS::Locator.new(buffer: buffer, dirs: dirs, decls: decls)
           loc_key, path = locator.find2(line: line, column: column) || return
@@ -68,18 +67,18 @@ module Steep
             TypeAliasContent.new(location: location, decl: alias_decl)
           when type_name.interface?
             interface_decl = env.interface_decls[type_name]&.decl or return
-            InterfaceContent.new(location: location, decl: interface_decl)
+            InterfaceTypeContent.new(location: location, decl: interface_decl)
           when type_name.class?
             class_entry = env.module_class_entry(type_name) or return
 
             case class_entry
             when ::RBS::Environment::ClassEntry, ::RBS::Environment::ModuleEntry
-              class_decl = class_entry.primary.decl
+              class_decl = class_entry.primary_decl
             when ::RBS::Environment::ClassAliasEntry, ::RBS::Environment::ModuleAliasEntry
               class_decl = class_entry.decl
             end
 
-            ClassContent.new(location: location, decl: class_decl)
+            ClassTypeContent.new(location: location, decl: class_decl)
           end
         end
       end

@@ -15,6 +15,7 @@ class InteractionWorkerTest < Minitest::Test
 
   include Server::CustomMethods
 
+  # @rbs (Server::InteractionWorker) { (Thread) -> void } -> void
   def run_worker(worker)
     t = Thread.new do
       worker.run()
@@ -386,6 +387,48 @@ RUBY
       )
 
       assert_instance_of LanguageServer::Protocol::Interface::CompletionList, response
+    end
+  end
+
+  def test_handle_completion_request_inline
+    in_tmpdir do
+      project = Project.new(steepfile_path: current_dir + "Steepfile")
+      Project::DSL.parse(project, <<EOF)
+target :lib do
+  check "lib/inline.rb", inline: true
+  signature "sig"
+end
+EOF
+      worker = Server::InteractionWorker.new(project: project, reader: worker_reader, writer: worker_writer, queue: [])
+
+      worker.service.update(
+        changes: {
+          Pathname("lib/inline.rb") => [ContentChange.string(<<RUBY)]
+class Foo
+  # @rbs @name: String
+
+  # @rbs () -> void
+  def hello
+    @name
+  end
+end
+RUBY
+        }
+      ) {}
+
+      response = worker.process_completion(
+        InteractionWorker::CompletionJob.new(
+          path: Pathname("lib/inline.rb"),
+          line: 6,
+          column: 5,
+          trigger: nil
+        )
+      )
+
+      assert_instance_of LanguageServer::Protocol::Interface::CompletionList, response
+      assert_any!(response.items) do |item|
+        assert_equal "@name", item.label
+      end
     end
   end
 

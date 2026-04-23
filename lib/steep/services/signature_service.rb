@@ -76,19 +76,36 @@ module Steep
         end
       end
 
-      FileStatus = _ = Struct.new(:path, :content, :signature, keyword_init: true)
+      RBSFileStatus = _ = Struct.new(:path, :content, :source, keyword_init: true)
 
       attr_reader :implicitly_returns_nil
 
-      def initialize(env:, implicitly_returns_nil:)
-        builder = RBS::DefinitionBuilder.new(env: env)
-        @status = LoadedStatus.new(builder: builder, files: {}, implicitly_returns_nil: implicitly_returns_nil)
+      def initialize(status:, implicitly_returns_nil:)
+        @status = status
         @implicitly_returns_nil = implicitly_returns_nil
       end
 
       def self.load_from(loader, implicitly_returns_nil:)
         env = RBS::Environment.from_loader(loader).resolve_type_names
-        new(env: env, implicitly_returns_nil: implicitly_returns_nil)
+        builder = RBS::DefinitionBuilder.new(env: env)
+        status = LoadedStatus.new(builder: builder, files: {}, implicitly_returns_nil: implicitly_returns_nil)
+        new(status: status, implicitly_returns_nil: implicitly_returns_nil)
+      rescue RBS::ParsingError => exn
+        # When library RBS contains syntax error, load only *core* libraries and set `SyntaxErrorStatus`.
+        core_loader = RBS::EnvironmentLoader.new(core_root: loader.core_root)
+        core_env = RBS::Environment.from_loader(core_loader).resolve_type_names
+        status = SyntaxErrorStatus.new(
+          files: {},
+          changed_paths: Set[],
+          diagnostics: [Diagnostic::Signature.from_rbs_error(exn, factory: _ = nil)],
+          last_builder: RBS::DefinitionBuilder.new(env: core_env)
+        )
+        service = new(status: status, implicitly_returns_nil: implicitly_returns_nil)
+        # Add the failed library path to env_rbs_paths so it's recognized as a library path by TypeCheckService
+        if exn.location
+          service.env_rbs_paths << Pathname(exn.location.buffer.name)
+        end
+        service
       end
 
       def env_rbs_paths
@@ -154,30 +171,74 @@ module Steep
       def apply_changes(files, changes)
         Steep.logger.tagged "#apply_changes" do
           Steep.measure2 "Applying change" do |sampler|
-            changes.each.with_object({}) do |pair, update|  # $ Hash[Pathname, FileStatus]
-              path, cs = pair
+            changes.each.with_object({}) do |(path, cs), update|  # $ Hash[Pathname, file_status]
               sampler.sample "#{path}" do
-                old_text = files[path]&.content
-                content = cs.inject(old_text || "") {|text, change| change.apply_to(text) }
+                old_file = files.fetch(path, nil)
 
-                content ||= "" # It was not clear why `content` can be `nil`, but it happens with `master_test`.
-                buffer = RBS::Buffer.new(name: path, content: content)
-
-                update[path] =
-                  begin
-                    FileStatus.new(path: path, content: content, signature: RBS::Parser.parse_signature(buffer))
-                  rescue ArgumentError => exn
-                    error = Diagnostic::Signature::UnexpectedError.new(
-                      message: exn.message,
-                      location: RBS::Location.new(buffer: buffer, start_pos: 0, end_pos: content.size)
-                    )
-                    FileStatus.new(path: path, content: content, signature: error)
-                  rescue RBS::ParsingError => exn
-                    FileStatus.new(path: path, content: content, signature: exn)
+                case old_file
+                when RBSFileStatus
+                  old_text = old_file.content
+                  new_file = load_rbs_file(path, old_text, cs)
+                when RBS::Source::Ruby
+                  old_text = old_file.buffer.content
+                  new_file = load_ruby_file(path, old_text, cs)
+                when nil
+                  # New file: Detect based on the file name
+                  if path.extname == ".rbs"
+                    # RBS File
+                    new_file = load_rbs_file(path, "", cs)
+                  else
+                    # Ruby File
+                    new_file = load_ruby_file(path, "", cs)
                   end
+                end
+
+                update[path] = new_file
               end
             end
           end
+        end
+      end
+
+      def load_rbs_file(path, old_text, changes)
+        content = changes.reduce(old_text) do |text, change| # $ String
+          change.apply_to(text)
+        end
+
+        buffer = RBS::Buffer.new(name: path, content: content)
+        source =
+          begin
+            _, dirs, decls = RBS::Parser.parse_signature(buffer)
+            RBS::Source::RBS.new(buffer, dirs, decls)
+          rescue ArgumentError => exn
+            Diagnostic::Signature::UnexpectedError.new(
+              message: exn.message,
+              location: RBS::Location.new(buffer: buffer, start_pos: 0, end_pos: content.size)
+            )
+          rescue RBS::ParsingError => exn
+            exn
+          end
+
+        RBSFileStatus.new(path: path, content: content, source: source)
+      end
+
+      def load_ruby_file(path, old_text, changes)
+        content = changes.reduce(old_text) do |text, change| # $ String
+          change.apply_to(text)
+        end
+
+        buffer = RBS::Buffer.new(name: path, content: content)
+        prism = Prism.parse(buffer.content, filepath: path.to_s)
+        result = RBS::InlineParser.parse(buffer, prism)
+        RBS::Source::Ruby.new(buffer, prism, result.declarations, result.diagnostics)
+      end
+
+      def error_file?(file)
+        case file
+        when RBSFileStatus
+          !file.source.is_a?(RBS::Source::RBS)
+        when RBS::Source::Ruby
+          false
         end
       end
 
@@ -187,18 +248,24 @@ module Steep
           paths = Set.new(updates.each_key)
           paths.merge(pending_changed_paths)
 
-          if updates.each_value.any? {|file| !file.signature.is_a?(Array) }
+          if updates.each_value.any? {|file| error_file?(file) }
             diagnostics = [] #: Array[Diagnostic::Signature::Base]
 
             updates.each_value do |file|
-              unless file.signature.is_a?(Array)
-                diagnostic = if file.signature.is_a?(Diagnostic::Signature::Base)
-                               file.signature
-                             else
-                               # factory is not used here because the error is a syntax error.
-                               Diagnostic::Signature.from_rbs_error(file.signature, factory: _ = nil)
-                             end
-                diagnostics << diagnostic
+              if error_file?(file)
+                if file.is_a?(RBSFileStatus)
+                  diagnostic =
+                    case file.source
+                    when Diagnostic::Signature::Base
+                      file.source
+                    when RBS::ParsingError
+                      Diagnostic::Signature.from_rbs_error(file.source, factory: _ = nil)
+                    else
+                      raise "file (#{file.path}) must be an error"
+                    end
+
+                  diagnostics << diagnostic
+                end
               end
             end
 
@@ -235,30 +302,26 @@ module Steep
       def update_env(updated_files, paths:)
         Steep.logger.tagged "#update_env" do
           errors = [] #: Array[RBS::BaseError]
-          new_decls = Set[].compare_by_identity #: Set[RBS::AST::Declarations::t]
+          new_decls = Set[].compare_by_identity #: Set[RBS::AST::Declarations::t | RBS::AST::Ruby::Declarations::t]
 
           env =
             Steep.measure "Deleting out of date decls" do
-              bufs = latest_env.buffers.select {|buf| paths.include?(buf.name) }
-              latest_env.unload(Set.new(bufs))
+              latest_env.unload(paths)
             end
 
           Steep.measure "Loading new decls" do
             updated_files.each_value do |content|
-              case content.signature
-              when RBS::ParsingError
-                errors << content.signature
-              when Diagnostic::Signature::UnexpectedError
-                return [content.signature]
-              else
-                begin
-                  buffer, dirs, decls = content.signature
-                  env.add_signature(buffer: buffer, directives: dirs, decls: decls)
-                  new_decls.merge(decls)
-                rescue RBS::LoadingError => exn
-                  errors << exn
-                end
+              case content
+              when RBSFileStatus
+                (source = content.source).is_a?(RBS::Source::RBS) or raise "Cannot be an error"
+                env.add_source(source)
+                new_decls.merge(source.declarations)
+              when RBS::Source::Ruby
+                env.add_source(content)
+                new_decls.merge(content.declarations)
               end
+            rescue RBS::LoadingError => exn
+              errors << exn
             end
           end
 
@@ -339,13 +402,25 @@ module Steep
       end
 
       def type_names(paths:, env:)
-        env.declarations.each.with_object(Set[]) do |decl, set|
-          if decl.location
-            if paths.include?(Pathname(decl.location.buffer.name))
-              type_name_from_decl(decl, set: set)
-            end
+
+        Hash.new {}
+        set = Set[] #: Set[RBS::TypeName]
+
+        env.each_rbs_source do |source|
+          next unless paths.include?(source.buffer.name)
+          source.each_type_name do |type_name|
+            set << type_name
           end
         end
+
+        env.each_ruby_source do |source|
+          next unless paths.include?(source.buffer.name)
+          source.each_type_name do |type_name|
+            set << type_name
+          end
+        end
+
+        set
       end
 
       def const_decls(paths:, env:)

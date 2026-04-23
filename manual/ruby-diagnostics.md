@@ -667,6 +667,45 @@ test.rb:1:0: [error] Invalid ignore comment
 | - | - | - | - | - |
 | error | warning | warning | warning | - |
 
+<a name='Ruby::LibraryRBSError'></a>
+## Ruby::LibraryRBSError
+
+Type checking failed because of errors in library RBS files.
+
+This diagnostic is reported on source files when RBS signatures from library or standard library
+have validation errors, such as superclass mismatches. Each error is reported as a separate diagnostic.
+
+### RBS
+
+```rbs
+class Integer < String
+end
+```
+
+### Ruby code
+
+```ruby
+1 + 2
+```
+
+### Diagnostic
+
+```
+a.rb:1:0: [error] Type checking failed due to error in library RBS file
+│ Different superclasses are specified for `::Integer`
+│ Diagnostic ID: Ruby::LibraryRBSError
+│
+└ 1 + 2
+  ~~~~~
+```
+
+
+### Severity
+
+| all_error | strict | default | lenient | silent |
+| - | - | - | - | - |
+| error | error | error | error | - |
+
 <a name='Ruby::MethodArityMismatch'></a>
 ## Ruby::MethodArityMismatch
 
@@ -1021,6 +1060,34 @@ test.rb:1:9: [error] Cannot find type `::Int`
 | all_error | strict | default | lenient | silent |
 | - | - | - | - | - |
 | error | error | information | information | - |
+
+<a name='Ruby::RedundantIgnoreComment'></a>
+## Ruby::RedundantIgnoreComment
+
+`steep:ignore` comment is redundant.
+
+### Ruby code
+
+```ruby
+1 + 1 # steep:ignore
+```
+
+### Diagnostic
+
+```
+test.rb:1:6: [hint] Redundant ignore comment
+│ Diagnostic ID: Ruby::RedundantIgnoreComment
+│
+└ 1 + 1 # steep:ignore
+        ~~~~~~~~~~~~~~
+```
+
+
+### Severity
+
+| all_error | strict | default | lenient | silent |
+| - | - | - | - | - |
+| error | warning | warning | hint | - |
 
 <a name='Ruby::RequiredBlockMissing'></a>
 ## Ruby::RequiredBlockMissing

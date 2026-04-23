@@ -19,7 +19,7 @@ module Steep
       @ignores = ignores
     end
 
-    class Builder < ::Parser::Builders::Default
+    class Builder < Prism::Translation::Parser::Builder
       def string_value(token)
         value(token)
       end
@@ -31,7 +31,7 @@ module Steep
     end
 
     def self.new_parser
-      ::Parser::Ruby33.new(Builder.new).tap do |parser|
+      Prism::Translation::Parser33.new(Builder.new).tap do |parser|
         parser.diagnostics.all_errors_are_fatal = true
         parser.diagnostics.ignore_warnings = true
       end
@@ -317,6 +317,20 @@ module Steep
       else
         enum_for :each_annotation
       end
+    end
+
+    def each_block_annotation(node, &block)
+      if block
+        if annots = mapping.fetch(node, nil)
+          annots.each(&block)
+        end
+      else
+        enum_for :each_block_annotation, node
+      end
+    end
+
+    def find_block_node(nodes)
+      nodes.find { mapping.key?(_1) }
     end
 
     def each_heredoc_node(node = self.node, parents = [], &block)

@@ -72,8 +72,9 @@ module TestHelper
 
   def assert_any(collection, &block)
     assert collection.any?(&block)
-  end
+  end 
 
+  # @rbs [T] (_Each[T], ?size: Integer) { (T) -> void } -> void
   def assert_any!(collection, size: nil, &block)
     errors = []
     count = 0
@@ -517,15 +518,15 @@ module ShellHelper
   end
 
   def sh(*command, **opts)
-    Open3.capture2(env_vars, *command, chdir: current_dir.to_s, **opts)
+    Open3.capture2(env_vars, *command, chdir: current_dir&.to_s || Dir.pwd, **opts)
   end
 
   def sh3(*command)
-    Open3.capture3(env_vars, *command, chdir: current_dir.to_s)
+    Open3.capture3(env_vars, *command, chdir: current_dir&.to_s || Dir.pwd)
   end
 
   def sh2e(*command)
-    Open3.capture2e(env_vars, *command, chdir: current_dir.to_s)
+    Open3.capture2e(env_vars, *command, chdir: current_dir&.to_s || Dir.pwd)
   end
 
   def sh!(*command, **opts)
@@ -547,8 +548,8 @@ end
 module FactoryHelper
   # @rbs @factory: Steep::AST::Types::Factory?
 
-  # @rbs (?Hash[String, String], ?nostdlib: bool) { (AST::Types::Factory) -> void } -> void
-  def with_factory(paths = {}, nostdlib: false)
+  # @rbs (?Hash[String, String], ?Hash[String, String], ?nostdlib: bool) { (AST::Types::Factory) -> void } -> void
+  def with_factory(paths = {}, inline_paths = {}, nostdlib: false)
     Dir.mktmpdir do |dir|
       root = Pathname(dir)
       paths.each do |path, content|
@@ -563,6 +564,14 @@ module FactoryHelper
 
       env = RBS::Environment.new()
       env_loader.load(env: env)
+
+      inline_paths.each do |path, content|
+        buffer = RBS::Buffer.new(name: Pathname(path), content: content)
+        prism = Prism.parse(content, filepath: path)
+        result = RBS::InlineParser.parse(buffer, prism)
+        env.add_source RBS::Source::Ruby.new(buffer, prism, result.declarations, result.diagnostics)
+      end
+
       env = env.resolve_type_names
 
       definition_builder = RBS::DefinitionBuilder.new(env: env)
@@ -575,7 +584,7 @@ module FactoryHelper
     end
   end
 
-  def factory
+  def factory #: Steep::AST::Types::Factory
     @factory or raise "#factory should be called from inside with_factory"
   end
 
@@ -584,6 +593,7 @@ module FactoryHelper
     factory.type(type)
   end
 
+  # @rbs (String, ?factory: AST::Types::Factory) -> Steep::Source
   def parse_ruby(string, factory: self.factory)
     Steep::Source.parse(string, path: Pathname("test.rb"), factory: factory)
   end

@@ -32,14 +32,22 @@ module Steep
           method_defs.map do |defn|
             type_name = defn.implemented_in || defn.defined_in
 
-            if name == :new && defn.member.is_a?(RBS::AST::Members::MethodDefinition) && defn.member.name == :initialize
+            case
+            when name == :new && defn.member.is_a?(RBS::AST::Members::MethodDefinition) && defn.member.name == :initialize
+              method_name = SingletonMethodName.new(type_name: type_name, method_name: name)
+            when name == :new && defn.member.is_a?(RBS::AST::Ruby::Members::DefMember) && defn.member.name == :initialize
               method_name = SingletonMethodName.new(type_name: type_name, method_name: name)
             else
               method_name =
-                if defn.member.kind == :singleton
-                  SingletonMethodName.new(type_name: defn.defined_in, method_name: name)
-                else
-                  # Call the `self?` method an instance method, because the definition is done with instance method definition, not with singleton method
+                case defn.member
+                when RBS::AST::Members::Base
+                  if defn.member.kind == :singleton
+                    SingletonMethodName.new(type_name: defn.defined_in, method_name: name)
+                  else
+                    # Call the `self?` method an instance method, because the definition is done with instance method definition, not with singleton method
+                    InstanceMethodName.new(type_name: defn.defined_in, method_name: name)
+                  end
+                when RBS::AST::Ruby::Members::DefMember, RBS::AST::Ruby::Members::AttributeMember
                   InstanceMethodName.new(type_name: defn.defined_in, method_name: name)
                 end
             end

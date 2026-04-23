@@ -18,17 +18,18 @@ class TypeCheckTest < Minitest::Test
 
   # @rbs signatures: Hash[String, String]
   # @rbs code: Hash[String, String]
+  # @rbs inline_code: Hash[String, String]
   # @rbs expectations: String?
   # @rbs &block: ? (Hash[String, Steep::Typing]) -> void
   # @rbs return: void
-  def run_type_check_test(signatures: {}, code: {}, expectations: nil, &block)
+  def run_type_check_test(signatures: {}, code: {}, inline_code: {}, expectations: nil, &block)
     typings = {}
 
-    with_factory(signatures, nostdlib: false) do |factory|
+    with_factory(signatures, inline_code, nostdlib: false) do |factory|
       builder = Interface::Builder.new(factory, implicitly_returns_nil: true)
       subtyping = Subtyping::Check.new(builder: builder)
 
-      code.each do |path, content|
+      code.merge(inline_code).each do |path, content|
         source = Source.parse(content, path: Pathname(path), factory: factory)
         with_standard_construction(subtyping, source) do |construction, typing|
           if source.node
@@ -1067,14 +1068,24 @@ class TypeCheckTest < Minitest::Test
       code: {
         "a.rb" => <<~RUBY
           x = [1].find { true }
-          return and true unless x
+          false and return unless x
           x + 1
         RUBY
       },
       expectations: <<~YAML
         ---
         - file: a.rb
-          diagnostics: []
+          diagnostics:
+          - range:
+              start:
+                line: 3
+                character: 2
+              end:
+                line: 3
+                character: 3
+            severity: ERROR
+            message: Type `(::Integer | nil)` does not have method `+`
+            code: Ruby::NoMethod
       YAML
     )
   end
@@ -1962,6 +1973,33 @@ class TypeCheckTest < Minitest::Test
           end
 
           x + 1
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_ensure_annotation
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          begin
+            x = "hello"
+            x + ""
+          ensure
+            # @type var x: String?
+            if x
+              x + ""
+            end
+          end
         RUBY
       },
       expectations: <<~YAML
@@ -3841,6 +3879,654 @@ class TypeCheckTest < Minitest::Test
             severity: ERROR
             message: Type `^() -> ::String` does not have method `ffffffffff`
             code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_splat_block
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Foo
+            def foo: () { ([Integer, String]) -> void } -> void
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          Foo.new.foo do |x, *|
+            x + 1
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_unnamed_splat_method_definition
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Foo
+            def bar: (Integer, *String) -> Integer
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class Foo
+            def bar(x, *)
+              x + 1
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_unnamed_kwsplat_method_definition
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Foo
+            def bar: (x: Integer, **String) -> Integer
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          class Foo
+            def bar(x:, **)
+              x + 1
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_inline__module_include
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          module M[T]
+            def foo: () -> T
+          end
+        RBS
+      },
+      inline_code: {
+        "a.rb" => <<~RUBY
+          class Foo
+            include M #[String]
+          end
+
+          Foo.new.foo.bar
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 5
+                character: 12
+              end:
+                line: 5
+                character: 15
+            severity: ERROR
+            message: Type `::String` does not have method `bar`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_inline__attributes
+    run_type_check_test(
+      signatures: {},
+      inline_code: {
+        "a.rb" => <<~RUBY
+          class Foo
+            attr_reader :foo
+
+            attr_writer :bar #: Integer
+
+            # @rbs skip
+            attr_accessor :baz
+          end
+
+          foo = Foo.new
+          foo.foo.bar
+          foo.bar = ""
+          foo.baz
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 12
+                character: 10
+              end:
+                line: 12
+                character: 12
+            severity: ERROR
+            message: |-
+              Cannot pass a value of type `::String` as an argument of type `::Integer`
+                ::String <: ::Integer
+                  ::Object <: ::Integer
+                    ::BasicObject <: ::Integer
+            code: Ruby::ArgumentTypeMismatch
+          - range:
+              start:
+                line: 13
+                character: 4
+              end:
+                line: 13
+                character: 7
+            severity: ERROR
+            message: Type `::Foo` does not have method `baz`
+            code: Ruby::NoMethod
+      YAML
+    )
+  end
+
+  def test_inline__inheritance
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class Parent
+            def foo: () -> String
+          end
+
+          class GenericParent[T]
+            def bar: () -> T
+          end
+        RBS
+      },
+      inline_code: {
+        "a.rb" => <<~RUBY
+          class Child < Parent
+            def call_foo
+              foo
+            end
+          end
+
+          class GenericChild < GenericParent #[Integer]
+            def call_bar
+              bar + 1
+            end
+          end
+
+          class StringChild < GenericParent #[String]
+            def call_bar
+              bar + "!"
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_inline__instance_variables
+    run_type_check_test(
+      signatures: {
+      },
+      inline_code: {
+        "a.rb" => <<~RUBY
+          class Foo
+            # @rbs @name: String
+
+            def initialize
+              @name = "Soutaro"
+            end
+
+            def to_s
+              "{ name => #{@name.inspect} }"
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_inline_constant_declaration_basic
+    run_type_check_test(
+      inline_code: {
+        "a.rb" => <<~RUBY
+          class MyClass
+            CONSTANT = "hello" #: String
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_inline_constant_declaration_type_mismatch
+    run_type_check_test(
+      inline_code: {
+        "a.rb" => <<~RUBY
+          class MyClass
+            NUMBER = 42 #: String
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics:
+          - range:
+              start:
+                line: 2
+                character: 11
+              end:
+                line: 2
+                character: 23
+            severity: ERROR
+            message: 'Assertion cannot hold: no relationship between inferred type (`::Integer`)
+              and asserted type (`::String`)'
+            code: Ruby::FalseAssertion
+      YAML
+    )
+  end
+
+  def test_inline_constant_declaration_with_complex_type
+    run_type_check_test(
+      inline_code: {
+        "a.rb" => <<~RUBY
+          class MyClass
+            CONFIG = { name: "test", count: 42 } #: Hash[Symbol, String | Integer]
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_inline_constant_declaration_nested_class
+    run_type_check_test(
+      inline_code: {
+        "a.rb" => <<~RUBY
+          class Outer
+            class Inner
+              VALUE = ["a", "b", "c"] #: Array[String]
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_inline_constant_declaration_module
+    run_type_check_test(
+      inline_code: {
+        "a.rb" => <<~RUBY
+          module MyModule
+            DEFAULT_SIZE = 100 #: Integer
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_inline_constant_declaration_with_nil
+    run_type_check_test(
+      inline_code: {
+        "a.rb" => <<~RUBY
+          class MyClass
+            OPTIONAL = nil #: String?
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_inline_constant_declaration_generic_type
+    run_type_check_test(
+      inline_code: {
+        "a.rb" => <<~RUBY
+          class Container
+            ITEMS = [{ "count" => 1 }, { "total" => 100 }] #: Array[Hash[String, Integer]]
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_inline_constant_declaration_inheritance
+    run_type_check_test(
+      inline_code: {
+        "a.rb" => <<~RUBY
+          class Parent
+            BASE_VALUE = "parent" #: String
+          end
+
+          class Child < Parent
+            CHILD_VALUE = 42 #: Integer
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_inline_constant_declaration_top_level
+    run_type_check_test(
+      inline_code: {
+        "a.rb" => <<~RUBY
+          # Version of the library
+          VERSION = "1.2.3".freeze #: String
+
+          ITEMS = [1, "hello"] #: [Integer, String]
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_inline_constant_declaration_type_inference
+    run_type_check_test(
+      inline_code: {
+        "a.rb" => <<~RUBY
+          class Config
+            MAX_SIZE = 100           # Should infer as Integer
+            PI = 3.14159            # Should infer as Float
+            DEBUG = false           # Should infer as bool
+            APP_NAME = "MyApp"      # Should infer as String
+            DEFAULT_MODE = :strict  # Should infer as :strict
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_inline_class_alias_basic
+    run_type_check_test(
+      inline_code: {
+        "a.rb" => <<~RUBY
+          class OriginalClass
+            def foo
+              "hello"
+            end
+          end
+
+          MyClass = OriginalClass #: class-alias
+
+          # Should be able to use MyClass as OriginalClass
+          obj = MyClass.new
+          obj.foo
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_inline_module_alias_basic
+    run_type_check_test(
+      inline_code: {
+        "a.rb" => <<~RUBY
+          module OriginalModule
+            def bar
+              42
+            end
+          end
+
+          MyModule = OriginalModule #: module-alias
+
+          class MyClass
+            include MyModule
+
+            def my_test
+              bar
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_inline_class_alias_with_explicit_type
+    run_type_check_test(
+      inline_code: {
+        "a.rb" => <<~RUBY
+          class SomeClass
+            def method1
+              "test"
+            end
+          end
+
+          # Using a variable that references the class
+          klass = SomeClass
+          AliasedClass = klass #: class-alias SomeClass
+
+          # Should work with the explicit type annotation
+          instance = AliasedClass.new
+          instance.method1
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_inline_module_alias_with_explicit_type
+    run_type_check_test(
+      inline_code: {
+        "a.rb" => <<~RUBY
+          module SomeModule
+            def helper
+              true
+            end
+          end
+
+          # Using a variable that references the module
+          mod = SomeModule
+          AliasedModule = mod #: module-alias SomeModule
+
+          class TestClass
+            include AliasedModule
+
+            def use_helper
+              helper
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_inline_class_alias_nested
+    run_type_check_test(
+      inline_code: {
+        "a.rb" => <<~RUBY
+          module Namespace
+            class InnerClass
+              def inner_method
+                "inner"
+              end
+            end
+
+            MyInnerClass = InnerClass #: class-alias
+          end
+
+          # Should work with nested alias
+          obj = Namespace::MyInnerClass.new
+          obj.inner_method
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_inline_class_alias_type_name
+    run_type_check_test(
+      inline_code: {
+        "a.rb" => <<~RUBY
+          MyString = String #: class-alias
+          MyKernel = Kernel #: module-alias
+
+          string = nil #: MyString?
+          kernel = nil #: MyKernel?
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_tuple_type_with_if_branch
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          module M
+            def test_if: (bool flag) -> (["yes", "ok"] | ["no", "error"])
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          module M
+            def test_if(flag)
+              if flag
+                ['yes', 'ok']
+              else
+                ['no', 'error']
+              end
+            end
+          end
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
+      YAML
+    )
+  end
+
+  def test_or_asgn_send_chain
+    run_type_check_test(
+      signatures: {
+        "a.rbs" => <<~RBS
+          class OrAssignBox[T]
+            attr_accessor value: T?
+          end
+        RBS
+      },
+      code: {
+        "a.rb" => <<~RUBY
+          array = OrAssignBox.new #: OrAssignBox[Array[String]]
+          (array.value ||= []) << "foo"
+
+          string = OrAssignBox.new #: OrAssignBox[String]
+          (string.value ||= "").encoding
+
+          integer = OrAssignBox.new #: OrAssignBox[Integer]
+          (integer.value ||= 0) + 1
+
+          symbol = OrAssignBox.new #: OrAssignBox[Symbol]
+          (symbol.value ||= :default).to_s
+
+          hash = OrAssignBox.new #: OrAssignBox[Hash[Symbol, String]]
+          (hash.value ||= {}).keys
+        RUBY
+      },
+      expectations: <<~YAML
+        ---
+        - file: a.rb
+          diagnostics: []
       YAML
     )
   end

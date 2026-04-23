@@ -7,10 +7,12 @@ module Steep
 
       WorkspaceSymbolJob = _ = Struct.new(:query, :id, keyword_init: true)
       StatsJob = _ = Struct.new(:id, keyword_init: true)
+      QueryDefinitionJob = _ = Struct.new(:id, :name, keyword_init: true)
       StartTypeCheckJob = _ = Struct.new(:guid, :changes, keyword_init: true)
       TypeCheckCodeJob = _ = Struct.new(:guid, :path, :target, keyword_init: true)
       ValidateAppSignatureJob = _ = Struct.new(:guid, :path, :target, keyword_init: true)
       ValidateLibrarySignatureJob = _ = Struct.new(:guid, :path, :target, keyword_init: true)
+      TypeCheckInlineCodeJob = _ = Struct.new(:guid, :path, :target, keyword_init: true)
       class GotoJob < Struct.new(:id, :kind, :params, keyword_init: true)
         def self.implementation(id:, params:)
           new(
@@ -52,6 +54,7 @@ module Steep
       include ChangeBuffer
 
       attr_reader :io_socket
+      attr_reader :need_to_warmup
 
       def initialize(project:, reader:, writer:, assignment:, commandline_args:, io_socket: nil, buffered_changes: nil, service: nil)
         super(project: project, reader: reader, writer: writer)
@@ -65,6 +68,7 @@ module Steep
         @io_socket = io_socket
         @service = service if service
         @child_pids = []
+        @need_to_warmup = defined?(Process.warmup)
 
         if io_socket
           Signal.trap "SIGCHLD" do
@@ -105,6 +109,9 @@ module Steep
         when CustomMethods::TypeCheck__Start::METHOD
           params = request[:params] #: CustomMethods::TypeCheck__Start::params
           enqueue_typecheck_jobs(params)
+        when CustomMethods::Query__Definition::METHOD
+          params = request[:params] #: CustomMethods::Query__Definition::params
+          queue << QueryDefinitionJob.new(id: request[:id], name: params[:name])
         when "textDocument/definition"
           queue << GotoJob.definition(id: request[:id], params: request[:params])
         when "textDocument/implementation"
@@ -117,6 +124,11 @@ module Steep
           # Receive IOs before fork to avoid receiving them from multiple processes
           stdin = io_socket.recv_io
           stdout = io_socket.recv_io
+
+          if need_to_warmup
+            Process.warmup
+            @need_to_warmup = false
+          end
 
           if pid = fork
             stdin.close
@@ -137,9 +149,11 @@ module Steep
 
             worker = self.class.new(project: project, reader: reader, writer: writer, assignment: assignment, commandline_args: commandline_args, io_socket: nil, buffered_changes: buffered_changes, service: service)
 
-            tags = Steep.logger.formatter.current_tags.dup
-            tags[tags.find_index("typecheck:typecheck@0")] = "typecheck:typecheck@#{index}-reforked"
-            Steep.logger.formatter.push_tags(tags)
+            tags = Steep.logger.current_tags.dup
+            if (index = tags.find_index("typecheck:typecheck@0"))
+              tags[index] = "typecheck:typecheck@#{index}-reforked"
+            end
+            Steep.logger.push_tags(*tags)
             worker.run()
 
             raise "unreachable"
@@ -165,10 +179,12 @@ module Steep
         libraries = params[:library_uris].map {|target_name, uri| [targets.fetch(target_name), Steep::PathHelper.to_pathname!(uri)] } #: Array[[Project::Target, Pathname]]
         signatures = params[:signature_uris].map {|target_name, uri| [targets.fetch(target_name), Steep::PathHelper.to_pathname!(uri)] } #: Array[[Project::Target, Pathname]]
         codes = params[:code_uris].map {|target_name, uri| [targets.fetch(target_name), Steep::PathHelper.to_pathname!(uri)] } #: Array[[Project::Target, Pathname]]
+        inlines = params[:inline_uris].map {|target_name, uri| [targets.fetch(target_name), Steep::PathHelper.to_pathname!(uri)] } #: Array[[Project::Target, Pathname]]
 
         priority_libs, non_priority_libs = libraries.partition {|_, path| priority_paths.include?(path) }
         priority_sigs, non_priority_sigs = signatures.partition {|_, path| priority_paths.include?(path) }
         priority_codes, non_priority_codes = codes.partition {|_, path| priority_paths.include?(path) }
+        priority_inlines, non_priority_inlines = inlines.partition {|_, path| priority_paths.include?(path) }
 
         priority_codes.each do |target, path|
           Steep.logger.info { "Enqueueing TypeCheckCodeJob for guid=#{guid}, path=#{path}, target=#{target.name}" }
@@ -185,6 +201,11 @@ module Steep
           queue << ValidateLibrarySignatureJob.new(guid: guid, path: path, target: target)
         end
 
+        priority_inlines.each do |target, path|
+          Steep.logger.info { "Enqueueing TypeCheckInlineCodeJob for guid=#{guid}, path=#{path}, target=#{target.name}" }
+          queue << TypeCheckInlineCodeJob.new(guid: guid, path: path, target: target)
+        end
+
         non_priority_codes.each do |target, path|
           Steep.logger.info { "Enqueueing TypeCheckCodeJob for guid=#{guid}, path=#{path}, target=#{target.name}" }
           queue << TypeCheckCodeJob.new(guid: guid, path: path, target: target)
@@ -198,6 +219,11 @@ module Steep
         non_priority_libs.each do |target, path|
           Steep.logger.info { "Enqueueing ValidateLibrarySignatureJob for guid=#{guid}, path=#{path}, target=#{target.name}" }
           queue << ValidateLibrarySignatureJob.new(guid: guid, path: path, target: target)
+        end
+
+        non_priority_inlines.each do |target, path|
+          Steep.logger.info { "Enqueueing TypeCheckInlineCodeJob for guid=#{guid}, path=#{path}, target=#{target.name}" }
+          queue << TypeCheckInlineCodeJob.new(guid: guid, path: path, target: target)
         end
       end
 
@@ -243,6 +269,25 @@ module Steep
             typecheck_progress(path: job.path, guid: job.guid, target: job.target, diagnostics: diagnostics&.filter_map { formatter.format(_1) })
           end
 
+        when TypeCheckInlineCodeJob
+          if job.guid == current_type_check_guid
+            Steep.logger.info { "Processing TypeCheckInlineCodeJob for guid=#{job.guid}, path=#{job.path}, target=#{job.target.name}" }
+            group_target = project.group_for_inline_source_path(job.path) || job.target
+            formatter = Diagnostic::LSPFormatter.new(group_target.code_diagnostics_config)
+            relative_path = project.relative_path(job.path)
+            diagnostics = service.typecheck_source(path: relative_path, target: job.target) #: Array[Diagnostic::Ruby::Base | Diagnostic::Signature::Base] | nil
+            signature_diagnostics = service.validate_signature(path: relative_path, target: job.target)
+            if diagnostics
+              diagnostics.concat(signature_diagnostics)
+            else
+              unless signature_diagnostics.empty?
+                diagnostics = signature_diagnostics
+              end
+            end
+
+            typecheck_progress(path: job.path, guid: job.guid, target: job.target, diagnostics: diagnostics&.filter_map { formatter.format(_1) })
+          end
+
         when WorkspaceSymbolJob
           writer.write(
             id: job.id,
@@ -257,6 +302,10 @@ module Steep
           writer.write(
             id: job.id,
             result: goto(job)
+          )
+        when QueryDefinitionJob
+          writer.write(
+            CustomMethods::Query__Definition.response(job.id, query_definition_result(job.name))
           )
         end
       end
@@ -307,6 +356,58 @@ module Steep
             stats << calculator.calc_stats(target, file: file)
           end
         end
+      end
+
+      def query_definition_result(name_string)
+        name = Services::GotoService.parse_name(name_string)
+
+        kind =
+          case name
+          when RBS::TypeName
+            "type_name"
+          when InstanceMethodName
+            "instance_method"
+          when SingletonMethodName
+            "singleton_method"
+          else
+            "unknown"
+          end #: CustomMethods::Query__Definition::kind
+
+        locations = [] #: Array[CustomMethods::Query__Definition::location]
+
+        if name
+          goto_service = Services::GotoService.new(type_check: service, assignment: assignment)
+          goto_service.query_definition(name).each do |loc|
+            case loc
+            when RBS::Location
+              path = Pathname(loc.buffer.name)
+              source = "rbs" #: CustomMethods::Query__Definition::source
+              if path.extname == ".rb"
+                source = "ruby" #: CustomMethods::Query__Definition::source
+              end
+              path = project.absolute_path(path)
+              locations << {
+                uri: Steep::PathHelper.to_uri(path).to_s,
+                range: loc.as_lsp_range,
+                source: source
+              }
+            else
+              path = Pathname(loc.source_buffer.name)
+              path = project.absolute_path(path)
+              locations << {
+                uri: Steep::PathHelper.to_uri(path).to_s,
+                range: loc.as_lsp_range,
+                source: "ruby"
+              }
+            end
+          end
+        end
+
+        {
+          name: name_string,
+          kind: kind,
+          locations: locations
+        }
       end
 
       def goto(job)

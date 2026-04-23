@@ -82,7 +82,7 @@ module Steep
       end
 
       def fetch_cache(cache, key)
-        if cache.key?(key)
+        if cache.key?(key) # steep:ignore ArgumentTypeMismatch
           return cache.fetch(key)
         end
 
@@ -239,8 +239,8 @@ module Steep
         vars =
           case type
           when AST::Types::Name::Instance
-            entry = factory.env.normalized_module_class_entry(type.name) or raise
-            entry.primary.decl.type_params.map { _1.name }
+            entry = factory.env.module_class_entry(type.name, normalized: true) or raise
+            entry.primary_decl.type_params.map { _1.name }
           when AST::Types::Name::Interface
             entry = factory.env.interface_decls.fetch(type.name)
             entry.decl.type_params.map { _1.name }
@@ -408,20 +408,34 @@ module Steep
       def method_name_for(type_def, name)
         type_name = type_def.implemented_in || type_def.defined_in
 
-        if name == :new && type_def.member.is_a?(RBS::AST::Members::MethodDefinition) && type_def.member.name == :initialize
-          return SingletonMethodName.new(type_name: type_name, method_name: name)
+        if name == :new
+          case type_def.member
+          when RBS::AST::Members::MethodDefinition
+            if type_def.member.name == :initialize
+              return SingletonMethodName.new(type_name: type_name, method_name: name)
+            end
+          when RBS::AST::Ruby::Members::DefMember
+            if type_def.member.name == :initialize
+              return SingletonMethodName.new(type_name: type_name, method_name: name)
+            end
+          end
         end
 
-        case type_def.member.kind
-        when :instance
+        case type_def.member
+        when RBS::AST::Members::Base
+          case type_def.member.kind
+          when :instance
+            InstanceMethodName.new(type_name: type_name, method_name: name)
+          when :singleton
+            SingletonMethodName.new(type_name: type_name, method_name: name)
+          when :singleton_instance
+            # Assume it a instance method, because `module_function` methods are typically defined with `def`
+            InstanceMethodName.new(type_name: type_name, method_name: name)
+          else
+            raise
+          end
+        when RBS::AST::Ruby::Members::DefMember, RBS::AST::Ruby::Members::AttributeMember
           InstanceMethodName.new(type_name: type_name, method_name: name)
-        when :singleton
-          SingletonMethodName.new(type_name: type_name, method_name: name)
-        when :singleton_instance
-          # Assume it a instance method, because `module_function` methods are typically defined with `def`
-          InstanceMethodName.new(type_name: type_name, method_name: name)
-        else
-          raise
         end
       end
 
@@ -779,7 +793,8 @@ module Steep
                   return_type: AST::Types::Logic::ArgIsReceiver.instance()
                 )
               )
-            when RBS::BuiltinNames::Object.name,
+            when RBS::BuiltinNames::BasicObject.name,
+              RBS::BuiltinNames::Object.name,
               RBS::BuiltinNames::Kernel.name,
               RBS::BuiltinNames::String.name,
               RBS::BuiltinNames::Integer.name,
@@ -791,6 +806,24 @@ module Steep
               return method_type.with(
                 type: method_type.type.with(
                   return_type: AST::Types::Logic::ArgEqualsReceiver.instance()
+                )
+              )
+            end
+          when :==
+            case defined_in
+            when RBS::BuiltinNames::BasicObject.name,
+              RBS::BuiltinNames::Object.name,
+              RBS::BuiltinNames::Kernel.name,
+              RBS::BuiltinNames::String.name,
+              RBS::BuiltinNames::Integer.name,
+              RBS::BuiltinNames::Symbol.name,
+              RBS::BuiltinNames::TrueClass.name,
+              RBS::BuiltinNames::FalseClass.name,
+              RBS::TypeName.parse("::NilClass")
+              # For ==, we use ReceiverIsArg to narrow the receiver based on the argument
+              return method_type.with(
+                type: method_type.type.with(
+                  return_type: AST::Types::Logic::ReceiverIsArg.instance()
                 )
               )
             end

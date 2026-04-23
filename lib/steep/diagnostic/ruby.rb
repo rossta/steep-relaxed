@@ -299,7 +299,7 @@ module Steep
         attr_reader :method_type
 
         def initialize(node:, method_type:)
-          loc = node.loc.begin.join(node.loc.end)
+          loc = node.loc.begin.join(node.loc.end) # steep:ignore NoMethod
           super(node: node, location: loc)
           @method_type = method_type
         end
@@ -313,7 +313,7 @@ module Steep
         attr_reader :method_type
 
         def initialize(node:, method_type:)
-          super(node: node, location: (node.type == :super || node.type == :zsuper) ? node.loc.keyword : node.loc.selector)
+          super(node: node, location: (node.type == :super || node.type == :zsuper) ? node.loc.keyword : node.loc.selector) # steep:ignore NoMethod
           @method_type = method_type
         end
 
@@ -349,7 +349,7 @@ module Steep
         include ResultPrinter
 
         def initialize(node:, expected:, actual:, result:)
-          super(node: node, location: node.loc.begin.join(node.loc.end))
+          super(node: node, location: node.loc.begin.join(node.loc.end)) # steep:ignore NoMethod
           @expected = expected
           @actual = actual
           @result = result
@@ -419,7 +419,7 @@ module Steep
           else
             raise "Unexpected node: #{node.type}"
           end
-          super(node: node, location: location)   # steep:ignore NoMethod
+          super(node: node, location: location)
 
           @name = name
         end
@@ -446,7 +446,7 @@ module Steep
                  when :defs
                    node.children[2]
                  end #: Parser::AST::Node?
-          super(node: node, location: args&.loc&.expression || node.loc.name)
+          super(node: node, location: args&.loc&.expression || node.loc.name) # steep:ignore NoMethod
           @method_type = method_type
         end
 
@@ -512,7 +512,7 @@ module Steep
         include ResultPrinter
 
         def initialize(node:, expected:, actual:, result:)
-          super(node: node, location: node.loc.name)
+          super(node: node, location: node.loc.name) # steep:ignore NoMethod
           @expected = expected
           @actual = actual
           @result = result
@@ -607,7 +607,7 @@ module Steep
         attr_reader :kind
 
         def initialize(node:, name:)
-          super(node: node, location: node.loc.name)
+          super(node: node, location: node.loc.name) # steep:ignore NoMethod
           @name = name
           @kind = :constant
         end
@@ -647,7 +647,7 @@ module Steep
         attr_reader :name
 
         def initialize(node:, name:)
-          super(node: node, location: node.loc.name)
+          super(node: node, location: node.loc.name) # steep:ignore NoMethod
           @name = name
         end
 
@@ -944,6 +944,33 @@ module Steep
         end
       end
 
+      class LibraryRBSError < Base
+        attr_reader :error
+
+        def initialize(error:, location:)
+          @error = error
+          super(node: nil, location: location)
+        end
+
+        def header_line
+          "Type checking failed due to error in library RBS file"
+        end
+
+        def detail_lines
+          lines = [] #: Array[String]
+          lines << error.header_line
+          if error.location
+            lines << "(#{error.location.buffer.name.to_s}:#{error.location.start_line}:#{error.location.start_column})"
+          end
+
+          if detail = error.detail_lines
+            lines << "" << detail
+          end
+
+          lines.join("\n")
+        end
+      end
+
       class InvalidIgnoreComment < Base
         attr_reader :comment
 
@@ -954,6 +981,16 @@ module Steep
 
         def header_line
           "Invalid ignore comment"
+        end
+      end
+
+      class RedundantIgnoreComment < Base
+        def initialize(location:)
+          super(node: nil, location: location)
+        end
+
+        def header_line
+          "Redundant ignore comment"
         end
       end
 
@@ -1075,6 +1112,7 @@ module Steep
             InsufficientPositionalArguments => :error,
             InsufficientTypeArgument => :hint,
             InvalidIgnoreComment => :warning,
+            RedundantIgnoreComment => :warning,
             MethodArityMismatch => :error,
             MethodBodyTypeMismatch => :error,
             MethodDefinitionInUndeclaredModule => :information,
@@ -1082,6 +1120,7 @@ module Steep
             MethodParameterMismatch => :error,
             MethodReturnTypeAnnotationMismatch => :hint,
             MultipleAssignmentConversionError => :hint,
+            LibraryRBSError => :error,
             NoMethod => :error,
             ProcHintIgnored => :hint,
             ProcTypeExpected => :hint,
@@ -1138,6 +1177,7 @@ module Steep
             InsufficientPositionalArguments => :error,
             InsufficientTypeArgument => :error,
             InvalidIgnoreComment => :warning,
+            RedundantIgnoreComment => :warning,
             MethodArityMismatch => :error,
             MethodBodyTypeMismatch => :error,
             MethodDefinitionInUndeclaredModule => :warning,
@@ -1201,6 +1241,7 @@ module Steep
             InsufficientPositionalArguments => :information,
             InsufficientTypeArgument => nil,
             InvalidIgnoreComment => :warning,
+            RedundantIgnoreComment => :hint,
             MethodArityMismatch => :information,
             MethodBodyTypeMismatch => :warning,
             MethodDefinitionInUndeclaredModule => :hint,
@@ -1208,6 +1249,7 @@ module Steep
             MethodParameterMismatch => :warning,
             MethodReturnTypeAnnotationMismatch => nil,
             MultipleAssignmentConversionError => nil,
+            LibraryRBSError => :error,
             NoMethod => :information,
             ProcHintIgnored => nil,
             ProcTypeExpected => nil,

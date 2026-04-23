@@ -16,19 +16,18 @@ module Steep
       def run: () -> Integer
 
       type project_json = {
-        "steepfile" => "String",
+        "steepfile" => String,
         "targets" => Array[target_json],
       }
 
-      type foo = untyped
-
-      def as_json: (Project) -> Hash[Symbol, untyped]
+      def as_json: (Project) -> project_json
 
       type library_json = { "name" => String, ?"version" => String?, "path" => String }
 
       type target_json = {
         "name" => String,
         "source_pattern" => pattern_json,
+        "inline_source_pattern" => pattern_json,
         "signature_pattern" => pattern_json,
         "groups" => Array[group_json],
         "unreferenced" => bool,

@@ -276,7 +276,6 @@ module Steep
       class VariableDuplicationError < Base
         attr_reader :type_name
         attr_reader :variable_name
-        attr_reader :location
 
         def initialize(type_name:, variable_name:, location:)
           @type_name = type_name
@@ -344,19 +343,27 @@ module Steep
         end
 
         def header_line
-          "Cannot #{mixin_name} a class `#{member.name}` in the definition of `#{type_name}`"
+          member_name = case member
+                        when RBS::AST::Members::Include, RBS::AST::Members::Extend, RBS::AST::Members::Prepend
+                          member.name
+                        when RBS::AST::Ruby::Members::IncludeMember, RBS::AST::Ruby::Members::ExtendMember, RBS::AST::Ruby::Members::PrependMember
+                          member.module_name
+                        end
+          "Cannot #{mixin_name} a class `#{member_name}` in the definition of `#{type_name}`"
         end
 
         private
 
         def mixin_name
           case mem = member
-          when RBS::AST::Members::Prepend
+          when RBS::AST::Members::Prepend, RBS::AST::Ruby::Members::PrependMember
             "prepend"
-          when RBS::AST::Members::Include
+          when RBS::AST::Members::Include, RBS::AST::Ruby::Members::IncludeMember
             "include"
-          when RBS::AST::Members::Extend
+          when RBS::AST::Members::Extend, RBS::AST::Ruby::Members::ExtendMember
             "extend"
+          else
+            raise "Unknown mixin type: #{mem.class}"
           end
         end
       end
@@ -430,8 +437,12 @@ module Steep
               "module"
             when RBS::AST::Declarations::ClassAlias
               "class"
-            else
-              raise
+            when RBS::AST::Ruby::Declarations::ClassModuleAliasDecl
+              if decl.annotation.is_a?(RBS::AST::Ruby::Annotations::ClassAliasAnnotation)
+                "class"
+              else
+                "module"
+              end
             end
 
           "A #{expected_kind} `#{decl.new_name}` cannot be an alias of `#{decl.old_name}`"
@@ -504,6 +515,18 @@ module Steep
         end
       end
 
+      class InlineDiagnostic < Base
+        attr_reader :diagnostic
+
+        def initialize(diagnostic)
+          super(location: diagnostic.location)
+          @diagnostic = diagnostic
+        end
+
+        def header_line
+          diagnostic.message
+        end
+      end
 
       def self.from_rbs_error(error, factory:)
         case error
@@ -572,7 +595,7 @@ module Steep
         when RBS::SuperclassMismatchError
           Diagnostic::Signature::SuperclassMismatch.new(
             name: error.name,
-            location: error.entry.primary.decl.location
+            location: error.entry.primary_decl.location
           )
         when RBS::InvalidVarianceAnnotationError
           Diagnostic::Signature::InvalidVarianceAnnotation.new(

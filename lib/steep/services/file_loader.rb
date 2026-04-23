@@ -20,10 +20,12 @@ module Steep
 
           target.groups.each do |group|
             each_path_in_patterns(group.source_pattern, command_line_patterns, &handler)
+            each_path_in_patterns(group.inline_source_pattern, command_line_patterns, &handler)
             each_path_in_patterns(group.signature_pattern, &handler)
           end
 
           each_path_in_patterns(target.source_pattern, command_line_patterns, &handler)
+          each_path_in_patterns(target.inline_source_pattern, command_line_patterns, &handler)
           each_path_in_patterns(target.signature_pattern, &handler)
         else
           enum_for :each_path_in_target, target, command_line_patterns
@@ -35,14 +37,14 @@ module Steep
           pats = commandline_patterns.empty? ? pattern.patterns : commandline_patterns
 
           pats.each do |path|
-            Pathname.glob((base_dir + path).to_s).each do |absolute_path|
+            Pathname(base_dir).glob(path.to_s).each do |absolute_path|
               if absolute_path.file?
                 relative_path = absolute_path.relative_path_from(base_dir)
                 if pattern =~ relative_path
                   yield relative_path
                 end
               else
-                files = Pathname.glob("#{absolute_path}/**/*#{pattern.ext}")
+                files = Pathname(absolute_path).glob("**/*#{pattern.ext}")
 
                 files.sort.each do |source_path|
                   if source_path.file?

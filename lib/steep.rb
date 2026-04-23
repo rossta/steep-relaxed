@@ -2,9 +2,7 @@ require "steep/version"
 
 require "pathname"
 require "parser/ruby33"
-require "active_support"
-require "active_support/core_ext/object/try"
-require "active_support/core_ext/string/inflections"
+require "prism"
 require "logger"
 require "rainbow"
 require "listen"
@@ -15,7 +13,6 @@ require "stringio"
 require 'uri'
 require "yaml"
 require "securerandom"
-require "base64"
 require "time"
 require 'socket'
 
@@ -26,6 +23,7 @@ require "rbs"
 
 require "steep/path_helper"
 require "steep/located_value"
+require "steep/tagged_logging"
 require "steep/thread_waiter"
 require "steep/equatable"
 require "steep/method_name"
@@ -99,6 +97,8 @@ require "steep/type_inference/multiple_assignment"
 require "steep/type_inference/method_call"
 require "steep/type_inference/case_when"
 
+require "steep/locator.rb"
+
 require "steep/index/rbs_index"
 require "steep/index/signature_symbol_provider"
 require "steep/index/source_index"
@@ -107,11 +107,14 @@ require "steep/services/content_change"
 require "steep/services/path_assignment"
 require "steep/services/signature_service"
 require "steep/services/type_check_service"
+require "steep/services/hover_provider/content"
 require "steep/services/hover_provider/singleton_methods"
 require "steep/services/hover_provider/ruby"
 require "steep/services/hover_provider/rbs"
-require "steep/services/type_name_completion"
 require "steep/services/completion_provider"
+require "steep/services/completion_provider/type_name"
+require "steep/services/completion_provider/ruby"
+require "steep/services/completion_provider/rbs"
 require "steep/services/signature_help_provider"
 require "steep/services/stats_calculator"
 require "steep/services/file_loader"
@@ -128,7 +131,9 @@ require "steep/server/interaction_worker"
 require "steep/server/type_check_worker"
 require "steep/server/target_group_files"
 require "steep/server/type_check_controller"
+require "steep/server/inline_source_change_detector"
 require "steep/server/master"
+require "steep/daemon"
 
 require "steep/project"
 require "steep/project/pattern"
@@ -150,6 +155,9 @@ require "steep/drivers/print_project"
 require "steep/drivers/init"
 require "steep/drivers/vendor"
 require "steep/drivers/worker"
+require "steep/drivers/start_server"
+require "steep/drivers/stop_server"
+require "steep/drivers/query"
 require "steep/drivers/diagnostic_printer"
 require "steep/drivers/diagnostic_printer/base_formatter"
 require "steep/drivers/diagnostic_printer/code_formatter"
@@ -173,19 +181,7 @@ module Steep
   end
 
   def self.new_logger(output, prev_level)
-    logger = Logger.new(output)
-    logger.formatter = proc do |severity, datetime, progname, msg|
-      # @type var severity: String
-      # @type var datetime: Time
-      # @type var progname: untyped
-      # @type var msg: untyped
-      # @type block: String
-      "#{datetime.strftime('%Y-%m-%d %H:%M:%S.%L')}: #{severity}: #{msg}\n"
-    end
-    ActiveSupport::TaggedLogging.new(logger).tap do |logger|
-      logger.push_tags "Steep #{VERSION}"
-      logger.level = prev_level || Logger::ERROR
-    end
+    TaggedLogging.new(output, level: prev_level || Logger::ERROR)
   end
 
   def self.log_output
@@ -195,11 +191,17 @@ module Steep
   def self.log_output=(output)
     @log_output = output
 
+    if output.is_a?(String)
+      io = File.open(output, "a")
+    else
+      io = output
+    end
+
     prev_level = @logger&.level
-    @logger = new_logger(output, prev_level)
+    @logger = new_logger(io, prev_level)
 
     prev_level = @ui_logger&.level
-    @ui_logger = new_logger(output, prev_level)
+    @ui_logger = new_logger(io, prev_level)
 
     output
   end
@@ -233,7 +235,15 @@ module Steep
   end
 
   def self.can_fork?
-    defined?(fork)
+    return @can_fork if defined?(@can_fork)
+
+    @can_fork = begin
+      pid = fork { exit!(0) }
+      Process.waitpid(pid) if pid
+      true
+    rescue NotImplementedError
+      false
+    end
   end
 
   class Sampler
@@ -299,17 +309,17 @@ module Steep
   end
 end
 
-klasses = [
-  # Steep::Interface::MethodType
-] #: Array[Class]
-
-klasses.each do |klass|
-  klass.instance_eval do
-    def self.new(*_a, **_b, &_c)
-      super
-    end
-  end
-end
+# klasses = [
+#   # Steep::Interface::MethodType
+# ] #: Array[Class]
+#
+# klasses.each do |klass|
+#   klass.instance_eval do
+#     def self.new(*_a, **_b, &_c)
+#       super
+#     end
+#   end
+# end
 
 module GCCounter
   module_function
